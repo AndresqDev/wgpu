@@ -1335,7 +1335,11 @@ impl crate::Device for Device {
         &self,
         _desc: &crate::ComputePipelineDescriptor<PipelineLayout, ShaderModule, PipelineCache>,
     ) -> Result<Resource, crate::PipelineError> {
-        unimplemented!("D3D11 compute pipeline creation is not implemented yet")
+        log::error!("D3D11 compute pipelines are not implemented");
+        Err(crate::PipelineError::Linkage(
+            wgt::ShaderStages::COMPUTE,
+            "D3D11 compute pipelines are not implemented".into(),
+        ))
     }
 
     unsafe fn destroy_compute_pipeline(&self, _pipeline: Resource) {}
@@ -1344,7 +1348,11 @@ impl crate::Device for Device {
         &self,
         _desc: &crate::RayTracingPipelineDescriptor<PipelineLayout, ShaderModule, PipelineCache>,
     ) -> Result<Resource, crate::PipelineError> {
-        unimplemented!("D3D11 does not support ray tracing")
+        log::error!("D3D11 does not support ray tracing pipelines");
+        Err(crate::PipelineError::Linkage(
+            wgt::ShaderStages::VERTEX_FRAGMENT,
+            "D3D11 does not support ray tracing pipelines".into(),
+        ))
     }
 
     unsafe fn destroy_ray_tracing_pipeline(&self, _pipeline: Resource) {}
@@ -1354,7 +1362,7 @@ impl crate::Device for Device {
         _pipeline: &Resource,
         _groups: core::ops::Range<u32>,
     ) -> Result<Vec<u8>, crate::DeviceError> {
-        unimplemented!("D3D11 does not support ray tracing")
+        Err(unexpected("D3D11 does not support ray tracing"))
     }
 
     unsafe fn create_pipeline_cache(
@@ -1370,34 +1378,99 @@ impl crate::Device for Device {
         &self,
         _desc: &wgt::QuerySetDescriptor<crate::Label>,
     ) -> Result<Resource, crate::DeviceError> {
-        unimplemented!("D3D11 query set creation is not implemented yet")
+        Err(unexpected("D3D11 query set creation is not implemented"))
     }
 
     unsafe fn destroy_query_set(&self, _set: Resource) {}
 
     unsafe fn create_fence(&self) -> Result<Fence, crate::DeviceError> {
-        Ok(Fence::new())
+        let desc = Direct3D11::D3D11_QUERY_DESC {
+            Query: Direct3D11::D3D11_QUERY_EVENT,
+            MiscFlags: 0,
+        };
+
+        let mut query: Option<Direct3D11::ID3D11Query> = None;
+        match unsafe { self.raw_device.CreateQuery(&desc, Some(&mut query)) } {
+            Ok(()) => query
+                .map(Fence::new)
+                .ok_or_else(|| unexpected("CreateQuery(D3D11_QUERY_EVENT) returned no query")),
+            Err(error) => {
+                log::error!("ID3D11Device::CreateQuery(D3D11_QUERY_EVENT) failed: {error}");
+                Err(crate::DeviceError::Unexpected)
+            }
+        }
     }
 
-    unsafe fn destroy_fence(&self, _fence: Fence) {}
+    unsafe fn destroy_fence(&self, _fence: Fence) {
+        // Dropping the fence releases its `ID3D11Query`. No explicit D3D11
+        // call is needed, and the query must not be used afterwards.
+    }
 
     unsafe fn get_fence_value(
         &self,
         fence: &Fence,
     ) -> Result<crate::FenceValue, crate::DeviceError> {
-        Ok(fence.value())
+        // wgpu-core treats this as the "currently finished submission index",
+        // so report the highest value the GPU has actually completed, never
+        // the highest value merely submitted.
+        //
+        // Poll the marker once without blocking first: `Poll`-style callers
+        // rely on repeated `get_fence_value` calls to observe progress without
+        // waiting. This never moves the completed value past real GPU work.
+        let pending = fence.pending();
+        if pending > fence.completed() {
+            let is_complete =
+                super::queue::query_complete(&self.raw_context, &self.raw_device, fence.query())?;
+            if is_complete {
+                fence.note_completed(pending);
+            }
+        }
+
+        Ok(fence.completed())
     }
 
     unsafe fn wait(
         &self,
         fence: &Fence,
         value: crate::FenceValue,
-        _timeout: Option<core::time::Duration>,
+        timeout: Option<core::time::Duration>,
     ) -> Result<bool, crate::DeviceError> {
-        // Queue submissions in this skeleton are CPU-synchronous and signal the
-        // fence immediately. A real implementation will poll an
-        // `ID3D11Query` of type `D3D11_QUERY_EVENT` here.
-        Ok(fence.value() >= value)
+        // Fast path: the GPU already reached this value.
+        if fence.completed() >= value {
+            return Ok(true);
+        }
+
+        // The value was never submitted on this fence, so waiting cannot make
+        // progress. The HAL contract says callers must not do this; report
+        // "not reached" instead of blocking until the timeout expires.
+        if fence.pending() < value {
+            log::warn!(
+                "waiting for D3D11 fence value {value}, which was never submitted \
+                 (pending value is {})",
+                fence.pending()
+            );
+            return Ok(false);
+        }
+
+        // Poll the per-fence `D3D11_QUERY_EVENT` marker. Only a marker the GPU
+        // has actually reached reports completion here, so `completed_value`
+        // is never advanced on a CPU-only guess. The value is snapshotted so a
+        // newer submission (which cannot happen concurrently under the HAL's
+        // synchronization contract) is never published as complete early.
+        let pending = fence.pending();
+        if super::queue::wait_for_query(
+            &self.raw_context,
+            &self.raw_device,
+            fence.query(),
+            timeout,
+        )? {
+            fence.note_completed(pending);
+            Ok(true)
+        } else {
+            // Timed out with the marker still in flight; the next wait (or the
+            // next submit, which retires the marker) will observe it.
+            Ok(false)
+        }
     }
 
     unsafe fn start_graphics_debugger_capture(&self) -> bool {
@@ -1410,7 +1483,7 @@ impl crate::Device for Device {
         &self,
         _desc: &crate::AccelerationStructureDescriptor,
     ) -> Result<Resource, crate::DeviceError> {
-        unimplemented!("D3D11 does not support acceleration structures")
+        Err(unexpected("D3D11 does not support acceleration structures"))
     }
 
     unsafe fn get_acceleration_structure_build_sizes<'a>(

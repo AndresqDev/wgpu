@@ -1,0 +1,94 @@
+name: DX11 HAL core check
+
+# Branch-local gate for the `dx11-hal-core` delivery. This does not replace
+# P6's canonical `dx11-contract.yml`; it validates Gate 0 capability values,
+# the pure capability tests and the raw DX11 examples.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - dx11-hal-core
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  check-windows:
+    name: Windows DX11 HAL core capabilities, tests and examples
+    runs-on: windows-2025
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check wgpu-hal with the DX11 backend
+        run: cargo check -p wgpu-hal --features dx11
+
+      - name: Run pure DX11 capability tests
+        run: cargo test -p wgpu-hal --features dx11 --lib
+
+      - name: Run raw-dx11 smoke test
+        run: cargo run -p wgpu-hal --example raw-dx11 --features dx11
+
+      - name: Run windowed examples with a bounded timeout
+        shell: pwsh
+        run: |
+          $examples = @('raw-dx11-window', 'raw-dx11-resize')
+          $failed = $false
+
+          foreach ($example in $examples) {
+            $log = Join-Path $env:RUNNER_TEMP "$example.log"
+            $err = Join-Path $env:RUNNER_TEMP "$example.err.log"
+            Remove-Item $log, $err -ErrorAction SilentlyContinue
+
+            $cargo = (Get-Command cargo).Source
+            $process = Start-Process -FilePath $cargo `
+              -ArgumentList 'run', '-p', 'wgpu-hal', '--example', $example, '--features', 'dx11' `
+              -NoNewWindow -PassThru `
+              -RedirectStandardOutput $log -RedirectStandardError $err
+
+            if (-not $process.WaitForExit(600000)) {
+              & taskkill.exe /F /T /PID $process.Id | Out-Host
+              Write-Host "::error::$example timed out after 10 minutes"
+              $failed = $true
+              continue
+            }
+
+            Get-Content $log -ErrorAction SilentlyContinue
+            Get-Content $err -ErrorAction SilentlyContinue
+
+            if ($process.ExitCode -ne 0) {
+              Write-Host "::error::$example exited with code $($process.ExitCode)"
+              $failed = $true
+            }
+          }
+
+          if ($failed) {
+            exit 1
+          }
+
+      - name: Upload example logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dx11-hal-core-example-logs
+          path: |
+            ${{ runner.temp }}/raw-dx11-window.log
+            ${{ runner.temp }}/raw-dx11-window.err.log
+            ${{ runner.temp }}/raw-dx11-resize.log
+            ${{ runner.temp }}/raw-dx11-resize.err.log
+          if-no-files-found: warn
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
