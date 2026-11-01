@@ -551,19 +551,16 @@ impl crate::Device for Device {
                 ));
             }
             // A raw buffer SRV is created with the buffer staged as a shader
-            // resource. Mixing it with constant buffers, vertex/index data,
-            // indirect arguments or CPU-accessible staging usage would either
-            // be rejected by D3D11 or silently drop one of the bindings.
+            // resource. Mixing it with constant buffers, vertex/index data or
+            // indirect arguments would silently drop one of the bindings.
             if usage.intersects(
-                wgt::BufferUses::MAP_READ
-                    | wgt::BufferUses::MAP_WRITE
-                    | wgt::BufferUses::VERTEX
+                wgt::BufferUses::VERTEX
                     | wgt::BufferUses::INDEX
                     | wgt::BufferUses::UNIFORM
                     | wgt::BufferUses::INDIRECT,
             ) {
                 return Err(unexpected(
-                    "D3D11 storage buffers cannot be combined with MAP_READ, MAP_WRITE, VERTEX, INDEX, UNIFORM or INDIRECT usage",
+                    "D3D11 storage buffers cannot be combined with VERTEX, INDEX, UNIFORM or INDIRECT usage",
                 ));
             }
         }
@@ -597,7 +594,16 @@ impl crate::Device for Device {
             return Err(unexpected("D3D11 buffers cannot exceed u32::MAX bytes"));
         }
 
-        let (map_mode, d3d_usage, cpu_access_flags) = if usage.contains(wgt::BufferUses::MAP_READ) {
+        // D3D11 cannot make a GPU resource both shader-visible and CPU
+        // accessible. wgpu-core sets MAP_WRITE for `mapped_at_creation`
+        // buffers (and some readback paths), so keep a staging copy and
+        // synchronize it with `CopyResource` around map/unmap.
+        let storage_mapped = storage
+            && usage.intersects(wgt::BufferUses::MAP_READ | wgt::BufferUses::MAP_WRITE);
+
+        let (map_mode, d3d_usage, cpu_access_flags) = if storage_mapped {
+            (BufferMapMode::GpuOnly, Direct3D11::D3D11_USAGE_DEFAULT, 0)
+        } else if usage.contains(wgt::BufferUses::MAP_READ) {
             if bind_flags != 0 {
                 return Err(unexpected(
                     "D3D11 read-back buffers must not be bound to a pipeline stage",
@@ -692,6 +698,43 @@ impl crate::Device for Device {
             unexpected("ID3D11Device::CreateBuffer succeeded without returning a buffer")
         })?;
 
+        let staging = if storage_mapped {
+            let mut access = 0u32;
+            if usage.contains(wgt::BufferUses::MAP_READ) {
+                access |= Direct3D11::D3D11_CPU_ACCESS_READ.0 as u32;
+            }
+            if usage.contains(wgt::BufferUses::MAP_WRITE) {
+                access |= Direct3D11::D3D11_CPU_ACCESS_WRITE.0 as u32;
+            }
+            let staging_desc = Direct3D11::D3D11_BUFFER_DESC {
+                ByteWidth: byte_width as u32,
+                Usage: Direct3D11::D3D11_USAGE_STAGING,
+                BindFlags: 0,
+                CPUAccessFlags: access,
+                MiscFlags: 0,
+                StructureByteStride: 0,
+            };
+            let mut staging: Option<Direct3D11::ID3D11Buffer> = None;
+            unsafe { self.raw_device.CreateBuffer(&staging_desc, None, Some(&mut staging)) }
+                .map_err(|e| {
+                    log::error!(
+                        "ID3D11Device::CreateBuffer failed for the storage staging copy (size {byte_width}): {e}"
+                    );
+                    if self.is_device_lost() {
+                        crate::DeviceError::Lost
+                    } else {
+                        crate::DeviceError::Unexpected
+                    }
+                })?;
+            Some(staging.ok_or_else(|| {
+                unexpected(
+                    "ID3D11Device::CreateBuffer succeeded without returning a staging buffer",
+                )
+            })?)
+        } else {
+            None
+        };
+
         log::debug!(
             "created D3D11 buffer: {} bytes (aligned to {byte_width}), usage {usage:?}",
             desc.size
@@ -699,6 +742,7 @@ impl crate::Device for Device {
 
         Ok(Buffer::new(
             raw,
+            staging,
             desc.size,
             usage,
             map_mode,
@@ -724,20 +768,32 @@ impl crate::Device for Device {
             ));
         }
 
-        let map_type = match buffer.map_mode() {
-            BufferMapMode::Dynamic => Direct3D11::D3D11_MAP_WRITE_DISCARD,
-            BufferMapMode::Staging => match (buffer.cpu_readable(), buffer.cpu_writable()) {
+        let map_raw = buffer.staging().unwrap_or_else(|| buffer.raw());
+        let map_type = if buffer.staging().is_some() {
+            match (buffer.cpu_readable(), buffer.cpu_writable()) {
                 (true, true) => Direct3D11::D3D11_MAP_READ_WRITE,
                 (true, false) => Direct3D11::D3D11_MAP_READ,
                 (false, true) => Direct3D11::D3D11_MAP_WRITE,
                 (false, false) => {
                     return Err(unexpected("D3D11 staging buffer has no CPU access flags"));
                 }
-            },
-            BufferMapMode::GpuOnly => {
-                return Err(unexpected(
-                    "buffer was not created with MAP_READ or MAP_WRITE usage",
-                ));
+            }
+        } else {
+            match buffer.map_mode() {
+                BufferMapMode::Dynamic => Direct3D11::D3D11_MAP_WRITE_DISCARD,
+                BufferMapMode::Staging => match (buffer.cpu_readable(), buffer.cpu_writable()) {
+                    (true, true) => Direct3D11::D3D11_MAP_READ_WRITE,
+                    (true, false) => Direct3D11::D3D11_MAP_READ,
+                    (false, true) => Direct3D11::D3D11_MAP_WRITE,
+                    (false, false) => {
+                        return Err(unexpected("D3D11 staging buffer has no CPU access flags"));
+                    }
+                },
+                BufferMapMode::GpuOnly => {
+                    return Err(unexpected(
+                        "buffer was not created with MAP_READ or MAP_WRITE usage",
+                    ));
+                }
             }
         };
 
@@ -745,10 +801,16 @@ impl crate::Device for Device {
             return Err(unexpected("D3D11 buffer is already mapped"));
         }
 
+        // A read mapping observes the latest GPU contents through the staging
+        // copy. Write-only mappings skip this copy.
+        if buffer.staging().is_some() && buffer.cpu_readable() {
+            unsafe { self.raw_context.CopyResource(map_raw, buffer.raw()) };
+        }
+
         let mut mapped = Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
         if let Err(e) = unsafe {
             self.raw_context
-                .Map(buffer.raw(), 0, map_type, 0, Some(&mut mapped))
+                .Map(map_raw, 0, map_type, 0, Some(&mut mapped))
         } {
             buffer.set_unmapped();
             log::error!("ID3D11DeviceContext::Map failed: {e}");
@@ -761,7 +823,7 @@ impl crate::Device for Device {
         let base = mapped.pData as *mut u8;
         if base.is_null() {
             buffer.set_unmapped();
-            unsafe { self.raw_context.Unmap(buffer.raw(), 0) };
+            unsafe { self.raw_context.Unmap(map_raw, 0) };
             return Err(unexpected(
                 "ID3D11DeviceContext::Map returned a null pointer",
             ));
@@ -777,10 +839,20 @@ impl crate::Device for Device {
     }
 
     unsafe fn unmap_buffer(&self, buffer: &Buffer) {
-        if buffer.set_unmapped() {
-            unsafe { self.raw_context.Unmap(buffer.raw(), 0) };
-        } else {
+        if !buffer.set_unmapped() {
             log::warn!("unmap_buffer called for a D3D11 buffer that was not mapped");
+            return;
+        }
+
+        if let Some(staging) = buffer.staging() {
+            unsafe { self.raw_context.Unmap(staging, 0) };
+            if buffer.cpu_writable() {
+                // Publish the CPU writes to the GPU-visible buffer. The
+                // immediate context executes this before any later draw.
+                unsafe { self.raw_context.CopyResource(buffer.raw(), staging) };
+            }
+        } else {
+            unsafe { self.raw_context.Unmap(buffer.raw(), 0) };
         }
     }
 

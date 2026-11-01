@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - dx11-storage-readonly
+      - dx11-storage-map
 
 permissions:
   contents: read
