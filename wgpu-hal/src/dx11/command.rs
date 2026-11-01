@@ -1514,7 +1514,7 @@ impl crate::CommandEncoder for CommandBuffer {
         }
         let stride = self.current_pipeline.as_ref().and_then(|pipeline| {
             pipeline
-                .vertex_strides()
+                .vertex_strides
                 .get(index as usize)
                 .copied()
                 .flatten()
