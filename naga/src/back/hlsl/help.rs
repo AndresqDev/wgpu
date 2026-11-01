@@ -2053,6 +2053,14 @@ impl<W: Write> super::Writer<'_, W> {
 
     /// Writes out the sampler heap declarations if they haven't been written yet.
     pub(super) fn write_sampler_heaps(&mut self) -> BackendResult {
+        debug_assert!(
+            matches!(
+                self.options.sampler_binding_mode,
+                super::SamplerBindingMode::Heap
+            ),
+            "sampler heaps are only used with SamplerBindingMode::Heap"
+        );
+
         if self.wrapped.sampler_heaps {
             return Ok(());
         }

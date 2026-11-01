@@ -99,12 +99,21 @@ accessing individual columns by dynamic index.
 
 ## Sampler Handling
 
-Due to limitations in how sampler heaps work in D3D12, we need to access samplers
-through a layer of indirection. Instead of directly binding samplers, we bind the entire
-sampler heap as both a standard and a comparison sampler heap. We then use a sampler
-index buffer for each bind group. This buffer is accessed in the shader to get the actual
-sampler index within the heap. See the wgpu_hal dx12 backend documentation for more
-information.
+The backend supports two sampler binding modes, selected with
+[`Options::sampler_binding_mode`].
+
+The default, [`SamplerBindingMode::Heap`], is used by D3D12. Due to limitations in how
+sampler heaps work in D3D12, we need to access samplers through a layer of indirection.
+Instead of directly binding samplers, we bind the entire sampler heap as both a standard
+and a comparison sampler heap. We then use a sampler index buffer for each bind group.
+This buffer is accessed in the shader to get the actual sampler index within the heap.
+See the wgpu_hal dx12 backend documentation for more information.
+
+[`SamplerBindingMode::Direct`] is intended for D3D11, which has no register spaces or
+descriptor tables. In this mode each sampler is declared as a real `SamplerState` or
+`SamplerComparisonState` global with its own `register(sN)`, and no sampler heap or
+sampler index buffer is generated. All sampler `BindTarget`s must use register space 0
+in this mode. Sampler binding arrays are not supported yet and produce an error.
 
 # External textures
 
@@ -149,6 +158,8 @@ mod keywords;
 mod mesh_shader;
 mod ray;
 mod storage;
+#[cfg(all(test, feature = "wgsl-in"))]
+mod tests;
 mod writer;
 
 use alloc::{string::String, vec::Vec};
@@ -457,6 +468,26 @@ where
 pub type ExternalTextureBindingMap =
     alloc::collections::BTreeMap<crate::ResourceBinding, ExternalTextureBindTarget>;
 
+/// How the HLSL backend should bind samplers.
+#[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize))]
+#[cfg_attr(feature = "deserialize", derive(serde::Deserialize))]
+pub enum SamplerBindingMode {
+    /// Bind a single sampler heap, and use per-bind-group sampler index buffers to select
+    /// samplers within it.
+    ///
+    /// This is the default, and is required for D3D12.
+    #[default]
+    Heap,
+    /// Declare each sampler directly as a `SamplerState` or `SamplerComparisonState`
+    /// global with its own `register(sN)`.
+    ///
+    /// This is intended for D3D11, which has neither register spaces nor descriptor
+    /// tables. All sampler [`BindTarget`]s must use register space 0. Sampler binding
+    /// arrays are not supported in this mode.
+    Direct,
+}
+
 /// Shorthand result used internally by the backend
 type BackendResult = Result<(), Error>;
 
@@ -515,9 +546,28 @@ pub struct Options {
     pub immediates_target: Option<BindTarget>,
 
     /// HLSL binding information for the sampler heap and comparison sampler heap.
+    ///
+    /// These fields are only used when [`Options::sampler_binding_mode`] is
+    /// [`SamplerBindingMode::Heap`].
     pub sampler_heap_target: SamplerHeapBindTargets,
 
+    /// How samplers are bound.
+    ///
+    /// [`SamplerBindingMode::Heap`] (the default) binds the D3D12 sampler heaps declared
+    /// using [`Options::sampler_heap_target`] and the per-bind-group index buffers from
+    /// [`Options::sampler_buffer_binding_map`].
+    ///
+    /// [`SamplerBindingMode::Direct`] declares each sampler as a real
+    /// `SamplerState`/`SamplerComparisonState` with its own `register(sN)`, using the
+    /// sampler's [`BindTarget::register`]. This is intended for D3D11. In this mode all
+    /// sampler [`BindTarget`]s must use register space 0, and sampler binding arrays are
+    /// not supported.
+    pub sampler_binding_mode: SamplerBindingMode,
+
     /// Mapping of each bind group's sampler index buffer to a bind target.
+    ///
+    /// This is only used when [`Options::sampler_binding_mode`] is
+    /// [`SamplerBindingMode::Heap`].
     #[cfg_attr(
         feature = "deserialize",
         serde(deserialize_with = "deserialize_sampler_index_buffer_bindings")
@@ -572,6 +622,7 @@ impl Default for Options {
             fake_missing_bindings: true,
             special_constants_binding: None,
             sampler_heap_target: SamplerHeapBindTargets::default(),
+            sampler_binding_mode: SamplerBindingMode::Heap,
             sampler_buffer_binding_map: alloc::collections::BTreeMap::default(),
             immediates_target: None,
             dynamic_storage_buffer_offsets_targets: alloc::collections::BTreeMap::new(),
@@ -674,6 +725,12 @@ pub enum Error {
     EntryPointNotFound(ir::ShaderStage, String),
     #[error("requires shader model {1:?} for reason: {0}")]
     ShaderModelTooLow(String, ShaderModel),
+    #[error("sampler binding array '{0}' is not supported with direct sampler bindings")]
+    SamplerBindingArrayUnsupported(String),
+    #[error(
+        "direct sampler binding '{0}' uses register space {1}, but direct sampler bindings require space 0"
+    )]
+    DirectSamplerNonZeroSpace(String, u8),
 }
 
 #[derive(PartialEq, Eq, Hash)]

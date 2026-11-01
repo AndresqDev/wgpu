@@ -15,7 +15,8 @@ use super::{
         WrappedZeroValue,
     },
     storage::StoreValue,
-    BackendResult, Error, FragmentEntryPoint, Options, PipelineOptions, ShaderModel,
+    BackendResult, Error, FragmentEntryPoint, Options, PipelineOptions, SamplerBindingMode,
+    ShaderModel,
 };
 use crate::{
     back::{self, get_entry_points, Baked},
@@ -1272,15 +1273,33 @@ impl<'a, W: fmt::Write> super::Writer<'a, W> {
         handle: Handle<crate::GlobalVariable>,
         global: &crate::GlobalVariable,
     ) -> BackendResult {
+        // This was already validated, so we can confidently unwrap it.
+        let bt = self
+            .options
+            .resolve_resource_binding(global.binding.as_ref().unwrap())
+            .unwrap();
+
+        match self.options.sampler_binding_mode {
+            SamplerBindingMode::Heap => self.write_global_sampler_heap(module, handle, global, bt),
+            SamplerBindingMode::Direct => {
+                self.write_global_sampler_direct(module, handle, global, bt)
+            }
+        }
+    }
+
+    fn write_global_sampler_heap(
+        &mut self,
+        module: &Module,
+        handle: Handle<crate::GlobalVariable>,
+        global: &crate::GlobalVariable,
+        bt: super::BindTarget,
+    ) -> BackendResult {
         let binding = *global.binding.as_ref().unwrap();
 
         let key = super::SamplerIndexBufferKey {
             group: binding.group,
         };
         self.write_wrapped_sampler_buffer(key)?;
-
-        // This was already validated, so we can confidently unwrap it.
-        let bt = self.options.resolve_resource_binding(&binding).unwrap();
 
         match module.types[global.ty].inner {
             TypeInner::Sampler { comparison } => {
@@ -1322,6 +1341,45 @@ impl<'a, W: fmt::Write> super::Writer<'a, W> {
             }
             _ => unreachable!(),
         };
+
+        Ok(())
+    }
+
+    fn write_global_sampler_direct(
+        &mut self,
+        module: &Module,
+        handle: Handle<crate::GlobalVariable>,
+        global: &crate::GlobalVariable,
+        bt: super::BindTarget,
+    ) -> BackendResult {
+        let name = &self.names[&NameKey::GlobalVariable(handle)];
+
+        // D3D11 has no register spaces. Reject nonzero spaces instead of silently
+        // aliasing samplers that are distinct in the source module.
+        if bt.space != 0 {
+            return Err(Error::DirectSamplerNonZeroSpace(name.to_string(), bt.space));
+        }
+
+        match module.types[global.ty].inner {
+            TypeInner::Sampler { comparison } => {
+                let sampler_ty = if comparison {
+                    "SamplerComparisonState"
+                } else {
+                    "SamplerState"
+                };
+                writeln!(
+                    self.out,
+                    "{sampler_ty} {name} : register(s{});",
+                    bt.register
+                )?;
+            }
+            TypeInner::BindingArray { .. } => {
+                // D3D11 sampler arrays have their own restrictions and need
+                // contiguous registers. Until that is implemented, fail loudly.
+                return Err(Error::SamplerBindingArrayUnsupported(name.to_string()));
+            }
+            _ => unreachable!(),
+        }
 
         Ok(())
     }
@@ -4349,14 +4407,17 @@ impl<'a, W: fmt::Write> super::Writer<'a, W> {
                 // In the case of binding arrays of samplers, we need to not write anything
                 // as the we are in the wrong position to fully write the expression.
                 //
-                // The entire writing is done by AccessIndex.
-                let is_binding_array_of_samplers = match *ty {
-                    TypeInner::BindingArray { base, .. } => {
-                        let base_ty = &module.types[base].inner;
-                        matches!(*base_ty, TypeInner::Sampler { .. })
-                    }
-                    _ => false,
-                };
+                // The entire writing is done by AccessIndex. This only applies to the
+                // heap-based sampler mode; direct mode rejects sampler binding arrays.
+                let is_heap_binding_array_of_samplers = self.options.sampler_binding_mode
+                    == SamplerBindingMode::Heap
+                    && match *ty {
+                        TypeInner::BindingArray { base, .. } => {
+                            let base_ty = &module.types[base].inner;
+                            matches!(*base_ty, TypeInner::Sampler { .. })
+                        }
+                        _ => false,
+                    };
 
                 let is_storage_space =
                     matches!(global_variable.space, crate::AddressSpace::Storage { .. });
@@ -4388,7 +4449,7 @@ impl<'a, W: fmt::Write> super::Writer<'a, W> {
                         "{}, {}, {}, {}",
                         plane_names[0], plane_names[1], plane_names[2], params_name
                     )?;
-                } else if !is_binding_array_of_samplers && !is_storage_space {
+                } else if !is_heap_binding_array_of_samplers && !is_storage_space {
                     let name = &self.names[&NameKey::GlobalVariable(handle)];
                     write!(self.out, "{name}")?;
                 }
@@ -4791,6 +4852,13 @@ impl<'a, W: fmt::Write> super::Writer<'a, W> {
         base: Handle<crate::Expression>,
         resolved: &TypeInner,
     ) -> Option<BindingArraySamplerInfo> {
+        // Direct sampler bindings never use the heap or the sampler index buffers.
+        // Binding arrays are rejected when their global is declared, so there is
+        // nothing to rewrite here.
+        if self.options.sampler_binding_mode != SamplerBindingMode::Heap {
+            return None;
+        }
+
         if let TypeInner::BindingArray {
             base: base_ty_handle,
             ..
