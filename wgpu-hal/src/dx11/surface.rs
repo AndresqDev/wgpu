@@ -122,6 +122,84 @@ impl Surface {
     }
 }
 
+fn create_swapchain(
+    factory: &Dxgi::IDXGIFactory2,
+    device: &Device,
+    hwnd: Foundation::HWND,
+    desc: &Dxgi::DXGI_SWAP_CHAIN_DESC1,
+    srgb_view: bool,
+    present_interval: u32,
+) -> Result<SwapChain, crate::SurfaceError> {
+    profiling::scope!("IDXGIFactory2::CreateSwapChainForHwnd");
+    let raw =
+        unsafe { factory.CreateSwapChainForHwnd(device.raw_device(), hwnd, desc, None, None) }
+            .map_err(|e| {
+                log::error!("failed to create the D3D11 swap chain: {e}");
+                crate::SurfaceError::Other("D3D11 swap-chain creation failed")
+            })?;
+
+    // `IDXGISwapChain3::GetCurrentBackBufferIndex` is the only reliable way
+    // to know which flip-model buffer is the current one. It is available
+    // on Windows 10+, which all supported D3D11 targets have in practice.
+    let raw3 = raw.cast::<Dxgi::IDXGISwapChain3>().ok();
+    if raw3.is_none() {
+        log::warn!("IDXGISwapChain3 is unavailable; falling back to back-buffer 0 for acquisition");
+    }
+
+    let mut views = Vec::with_capacity(desc.BufferCount as usize);
+    for index in 0..desc.BufferCount {
+        let texture: Direct3D11::ID3D11Texture2D =
+            unsafe { raw.GetBuffer(index) }.map_err(|e| {
+                log::error!("failed to get swap-chain buffer {index}: {e}");
+                crate::SurfaceError::Other("failed to access the D3D11 swap-chain buffer")
+            })?;
+
+        let view = if srgb_view {
+            match TextureView::create_render_target(
+                device.raw_device(),
+                &texture,
+                Some(Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM_SRGB),
+            ) {
+                Ok(view) => view,
+                Err(e) => {
+                    log::warn!(
+                        "sRGB render-target view for swap-chain buffer {index} failed ({e}); \
+                             falling back to the non-sRGB format"
+                    );
+                    TextureView::create_render_target(device.raw_device(), &texture, None).map_err(
+                        |e| {
+                            log::error!(
+                                "failed to create a render-target view for swap-chain buffer \
+                                     {index}: {e}"
+                            );
+                            crate::SurfaceError::Other(
+                                "failed to create the D3D11 swap-chain render target",
+                            )
+                        },
+                    )?
+                }
+            }
+        } else {
+            TextureView::create_render_target(device.raw_device(), &texture, None).map_err(|e| {
+                log::error!(
+                    "failed to create a render-target view for swap-chain buffer {index}: \
+                             {e}"
+                );
+                crate::SurfaceError::Other("failed to create the D3D11 swap-chain render target")
+            })?
+        };
+
+        views.push(view);
+    }
+
+    Ok(SwapChain {
+        raw,
+        raw3,
+        views,
+        present_interval,
+    })
+}
+
 impl crate::Surface for Surface {
     type A = Api;
 
@@ -187,7 +265,7 @@ impl crate::Surface for Surface {
         let old_swapchain = self.state.lock().swapchain.take();
         drop(old_swapchain);
 
-        let desc = Dxgi::DXGI_SWAP_CHAIN_DESC1 {
+        let mut desc = Dxgi::DXGI_SWAP_CHAIN_DESC1 {
             Width: config.extent.width,
             Height: config.extent.height,
             Format: SWAPCHAIN_FORMAT,
@@ -204,82 +282,43 @@ impl crate::Surface for Surface {
             Flags: 0,
         };
 
-        profiling::scope!("IDXGIFactory2::CreateSwapChainForHwnd");
-        let raw = unsafe {
-            self.factory
-                .CreateSwapChainForHwnd(device.raw_device(), self.hwnd, &desc, None, None)
-        }
-        .map_err(|e| {
-            log::error!("failed to create the D3D11 swap chain: {e}");
-            crate::SurfaceError::Other("D3D11 swap-chain creation failed")
-        })?;
-
-        // `IDXGISwapChain3::GetCurrentBackBufferIndex` is the only reliable way
-        // to know which flip-model buffer is the current one. It is available
-        // on Windows 10+, which all supported D3D11 targets have in practice.
-        let raw3 = raw.cast::<Dxgi::IDXGISwapChain3>().ok();
-        if raw3.is_none() {
-            log::warn!(
-                "IDXGISwapChain3 is unavailable; falling back to back-buffer 0 for acquisition"
-            );
-        }
-
-        let mut views = Vec::with_capacity(BUFFER_COUNT as usize);
-        for index in 0..BUFFER_COUNT {
-            let texture: Direct3D11::ID3D11Texture2D =
-                unsafe { raw.GetBuffer(index) }.map_err(|e| {
-                    log::error!("failed to get swap-chain buffer {index}: {e}");
-                    crate::SurfaceError::Other("failed to access the D3D11 swap-chain buffer")
-                })?;
-
-            let view = if srgb_view {
-                match TextureView::create_render_target(
-                    device.raw_device(),
-                    &texture,
-                    Some(Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM_SRGB),
-                ) {
-                    Ok(view) => view,
-                    Err(e) => {
-                        log::warn!(
-                            "sRGB render-target view for swap-chain buffer {index} failed ({e}); \
-                             falling back to the non-sRGB format"
-                        );
-                        TextureView::create_render_target(device.raw_device(), &texture, None)
-                            .map_err(|e| {
-                                log::error!(
-                                    "failed to create a render-target view for swap-chain buffer \
-                                     {index}: {e}"
-                                );
-                                crate::SurfaceError::Other(
-                                    "failed to create the D3D11 swap-chain render target",
-                                )
-                            })?
-                    }
-                }
-            } else {
-                TextureView::create_render_target(device.raw_device(), &texture, None).map_err(
-                    |e| {
-                        log::error!(
-                            "failed to create a render-target view for swap-chain buffer {index}: \
-                             {e}"
-                        );
-                        crate::SurfaceError::Other(
-                            "failed to create the D3D11 swap-chain render target",
-                        )
-                    },
-                )?
-            };
-
-            views.push(view);
-        }
+        let swapchain = match create_swapchain(
+            &self.factory,
+            device,
+            self.hwnd,
+            &desc,
+            srgb_view,
+            present_interval,
+        ) {
+            Ok(swapchain) => swapchain,
+            Err(first_error) => {
+                // Microsoft's WARP/basic render driver can report a flip-model
+                // swap chain but fail to expose its second buffer. Fall back to
+                // the legacy discard model with one buffer; the native Intel
+                // driver normally takes the flip path above.
+                log::warn!(
+                    "flip-model D3D11 swap chain is unusable ({first_error:?}); \
+                     retrying with DXGI_SWAP_EFFECT_DISCARD"
+                );
+                desc.SwapEffect = Dxgi::DXGI_SWAP_EFFECT_DISCARD;
+                desc.BufferCount = 1;
+                create_swapchain(
+                    &self.factory,
+                    device,
+                    self.hwnd,
+                    &desc,
+                    srgb_view,
+                    present_interval,
+                )
+                .map_err(|e| {
+                    log::error!("failed to create a compatible D3D11 swap chain: {e:?}");
+                    e
+                })?
+            }
+        };
 
         let mut state = self.state.lock();
-        state.swapchain = Some(SwapChain {
-            raw,
-            raw3,
-            views,
-            present_interval,
-        });
+        state.swapchain = Some(swapchain);
 
         log::debug!(
             "configured D3D11 surface: {}x{}, B8G8R8A8_UNORM{}",
