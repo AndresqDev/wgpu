@@ -134,6 +134,28 @@ gles = [
     "windows/Win32_System_LibraryLoader",
     "windows/Win32_UI_WindowsAndMessaging",
 ]
+## Enables the experimental DX11 backend when targeting Windows.
+##
+## Currently this only provides DXGI adapter enumeration and `D3D11CreateDevice`
+## based device creation. Rendering, shaders and presentation are stubs.
+dx11 = [
+    "dep:arrayvec",
+    "dep:bytemuck",
+    "dep:libloading",
+    "dep:parking_lot",
+    "dep:profiling",
+    "dep:windows",
+    "naga/hlsl-out",
+    "windows/Win32_Foundation",
+    "windows/Win32_Graphics_Direct3D",
+    "windows/Win32_Graphics_Direct3D11",
+    "windows/Win32_Graphics_Direct3D_Fxc",
+    "windows/Win32_Graphics_Dxgi",
+    "windows/Win32_Graphics_Dxgi_Common",
+    "windows/Win32_Graphics_Gdi",
+    "windows/Win32_System_LibraryLoader",
+    "windows/Win32_UI_WindowsAndMessaging",
+]
 ## Enables the DX12 backend when targeting Windows.
 dx12 = [
     "dep:arrayvec",
@@ -199,6 +221,10 @@ name = "halmark"
 [[example]]
 name = "raw-gles"
 required-features = ["gles"]
+
+[[example]]
+name = "raw-dx11"
+required-features = ["dx11"]
 
 #####################
 ### Platform: All ###

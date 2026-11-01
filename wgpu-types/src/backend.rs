@@ -49,6 +49,11 @@ pub enum Backend {
     Gl = 4,
     /// WebGPU in the browser
     BrowserWebGpu = 5,
+    /// Direct3D 11 (Windows)
+    ///
+    /// This backend is experimental and currently only supports adapter enumeration
+    /// and device creation. Rendering and presentation are not implemented yet.
+    Dx11 = 6,
 }
 
 impl Backend {
@@ -60,6 +65,7 @@ impl Backend {
         Self::Dx12,
         Self::Gl,
         Self::BrowserWebGpu,
+        Self::Dx11,
     ];
 
     /// Returns the string name of the backend.
@@ -72,6 +78,7 @@ impl Backend {
             Backend::Dx12 => "dx12",
             Backend::Gl => "gl",
             Backend::BrowserWebGpu => "webgpu",
+            Backend::Dx11 => "dx11",
         }
     }
 }
@@ -109,6 +116,13 @@ bitflags::bitflags! {
         /// Supported on Windows 10 and later
         const DX12 = 1 << Backend::Dx12 as u32;
 
+        /// [`Backend::Dx11`].
+        /// Supported on Windows.
+        ///
+        /// This backend is experimental and only implements adapter enumeration and
+        /// device creation so far.
+        const DX11 = 1 << Backend::Dx11 as u32;
+
         /// [`Backend::BrowserWebGpu`].
         /// Supported when targeting the web through WebAssembly with the `webgpu` feature enabled.
         ///
@@ -133,7 +147,8 @@ bitflags::bitflags! {
         /// be unsupported/still experimental.
         ///
         /// * [`Backends::GL`]
-        const SECONDARY = Self::GL.bits();
+        /// * [`Backends::DX11`]
+        const SECONDARY = Self::GL.bits() | Self::DX11.bits();
     }
 }
 
@@ -176,6 +191,7 @@ impl Backends {
     /// Names:
     /// - vulkan = "vulkan" or "vk"
     /// - dx12   = "dx12" or "d3d12"
+    /// - dx11   = "dx11" or "d3d11"
     /// - metal  = "metal" or "mtl"
     /// - gles   = "opengl" or "gles" or "gl"
     /// - webgpu = "webgpu"
@@ -185,6 +201,7 @@ impl Backends {
             backends |= match backend.trim() {
                 "vulkan" | "vk" => Self::VULKAN,
                 "dx12" | "d3d12" => Self::DX12,
+                "dx11" | "d3d11" => Self::DX11,
                 "metal" | "mtl" => Self::METAL,
                 "opengl" | "gles" | "gl" => Self::GL,
                 "webgpu" => Self::BROWSER_WEBGPU,

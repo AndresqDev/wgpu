@@ -97,7 +97,12 @@
 //! - The GL backend is available anywhere OpenGL, OpenGL ES, or WebGL are
 //!   available. See the [`gles`] module documentation for details.
 //!
+//! - The Direct3D 11 backend is available on Windows. It is currently an
+//!   experimental skeleton that only enumerates DXGI adapters and creates a
+//!   `D3D11CreateDevice` device; see the [`dx11`] module documentation.
+//!
 //! [`gles`]: gles/index.html
+//! [`dx11`]: dx11/index.html
 //!
 //! You can see what capabilities an adapter is missing by checking the
 //! [`DownlevelCapabilities`][tdc] in [`ExposedAdapter::capabilities`], available
@@ -243,10 +248,13 @@ extern crate alloc;
 extern crate naga_types as nt;
 extern crate wgpu_types as wgt;
 // Each of these backends needs `std` in some fashion; usually `std::thread` functions.
-#[cfg(any(dx12, gles_with_std, metal, vulkan))]
+#[cfg(any(dx11, dx12, gles_with_std, metal, vulkan))]
 #[macro_use]
 extern crate std;
 
+/// DirectX11 API internals.
+#[cfg(dx11)]
+pub mod dx11;
 /// DirectX12 API internals.
 #[cfg(dx12)]
 pub mod dx12;
@@ -265,6 +273,8 @@ pub mod vulkan;
 
 pub mod auxil;
 pub mod api {
+    #[cfg(dx11)]
+    pub use super::dx11::Api as Dx11;
     #[cfg(dx12)]
     pub use super::dx12::Api as Dx12;
     #[cfg(gles)]

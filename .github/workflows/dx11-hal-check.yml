@@ -1,0 +1,32 @@
+name: DX11 HAL Check
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - dx11-hal-skeleton
+
+jobs:
+  check-windows:
+    name: Windows DX11 check and smoke test
+    runs-on: windows-2025
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check wgpu-types
+        run: cargo check -p wgpu-types
+
+      - name: Check wgpu-hal with the DX11 backend
+        run: cargo check -p wgpu-hal --features dx11
+
+      - name: Run raw-dx11 smoke test
+        run: cargo run -p wgpu-hal --example raw-dx11 --features dx11
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check

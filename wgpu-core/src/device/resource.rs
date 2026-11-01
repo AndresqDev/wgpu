@@ -2534,6 +2534,14 @@ impl Device {
                     return Err(pipeline::CreateShaderModuleError::NotCompiledForBackend);
                 }
             }
+            // D3D11 consumes HLSL compiled with FXC/D3DCompile; DXIL is D3D12-only.
+            wgt::Backend::Dx11 => {
+                if let Some(hlsl) = &descriptor.hlsl {
+                    hal::ShaderInput::Hlsl { shader: hlsl }
+                } else {
+                    return Err(pipeline::CreateShaderModuleError::NotCompiledForBackend);
+                }
+            }
             wgt::Backend::Metal => {
                 if let Some(metallib) = &descriptor.metallib {
                     hal::ShaderInput::MetalLib {
