@@ -1,18 +1,21 @@
 //! D3D11 device implementation.
 //!
 //! The device owns the `ID3D11Device` created by [`crate::Adapter::open`].
-//! Buffers, 2D textures, texture views and samplers are created here; bind
-//! groups, shaders, pipelines and query sets remain explicit stubs for later
-//! milestones.
+//! Buffers, 2D textures, texture views, samplers, bind groups, shader modules
+//! and render pipelines are created here. Compute pipelines, query sets and
+//! acceleration structures remain explicit stubs for later milestones.
 
-use alloc::vec::Vec;
+use alloc::{ffi::CString, string::ToString as _, vec::Vec};
 use core::{fmt, ptr::NonNull};
 
-use windows::Win32::Graphics::{Direct3D, Direct3D11, Dxgi};
+use windows::{
+    core::PCSTR,
+    Win32::Graphics::{Direct3D, Direct3D11, Dxgi},
+};
 
 use super::{
     Api, BindGroup, BindGroupLayout, Buffer, BufferMapMode, CommandBuffer, Fence, PipelineCache,
-    PipelineLayout, Resource, Sampler, ShaderModule, Texture, TextureView,
+    PipelineLayout, RenderPipeline, Resource, Sampler, ShaderModule, Texture, TextureView,
 };
 
 /// Rounds `value` up to a multiple of `alignment`, which must be a power of two.
@@ -145,6 +148,315 @@ impl Device {
     pub fn limits(&self) -> &wgt::Limits {
         &self.limits
     }
+}
+
+/// Returns an error for an unsupported render pipeline feature.
+fn pipeline_error(message: impl Into<alloc::string::String>) -> crate::PipelineError {
+    let message = message.into();
+    log::error!("{message}");
+    crate::PipelineError::Linkage(wgt::ShaderStages::VERTEX_FRAGMENT, message)
+}
+
+/// Builds a D3D11 input layout from the WebGPU vertex buffer descriptions.
+///
+/// Naga's HLSL backend names vertex inputs `LOC0`, `LOC1`, ... so the input
+/// layout uses semantic name `LOC` with the shader location as the semantic
+/// index. Direct HLSL shader modules must follow the same convention.
+fn create_input_layout(
+    device: &Direct3D11::ID3D11Device,
+    vertex_buffers: &[Option<crate::VertexBufferLayout<'_>>],
+    vertex_bytecode: &[u8],
+) -> Result<(Option<Direct3D11::ID3D11InputLayout>, Vec<Option<u32>>), crate::PipelineError> {
+    if vertex_buffers.len() > Direct3D11::D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT as usize {
+        return Err(pipeline_error(alloc::format!(
+            "D3D11 render pipelines support at most {} vertex buffer slots, got {}",
+            Direct3D11::D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT,
+            vertex_buffers.len()
+        )));
+    }
+
+    let semantic = CString::new("LOC")
+        .map_err(|_| pipeline_error("failed to create the D3D11 input semantic string"))?;
+    let mut elements: Vec<Direct3D11::D3D11_INPUT_ELEMENT_DESC> = Vec::new();
+    let mut strides: Vec<Option<u32>> = Vec::new();
+    strides.resize(vertex_buffers.len(), None);
+    let mut locations: Vec<u32> = Vec::new();
+
+    for (slot, layout) in vertex_buffers.iter().enumerate() {
+        let Some(layout) = layout else {
+            continue;
+        };
+
+        let stride = u32::try_from(layout.array_stride).map_err(|_| {
+            pipeline_error(alloc::format!(
+                "vertex buffer slot {slot} stride {} does not fit in u32",
+                layout.array_stride
+            ))
+        })?;
+        strides[slot] = Some(stride);
+
+        let (input_slot_class, step_rate) = match layout.step_mode {
+            wgt::VertexStepMode::Vertex => (Direct3D11::D3D11_INPUT_PER_VERTEX_DATA, 0),
+            wgt::VertexStepMode::Instance => (Direct3D11::D3D11_INPUT_PER_INSTANCE_DATA, 1),
+        };
+
+        for attribute in layout.attributes {
+            if locations.contains(&attribute.shader_location) {
+                return Err(pipeline_error(alloc::format!(
+                    "vertex shader location {} is declared more than once",
+                    attribute.shader_location
+                )));
+            }
+            locations.push(attribute.shader_location);
+
+            let format = super::conv::map_vertex_format(attribute.format).ok_or_else(|| {
+                pipeline_error(alloc::format!(
+                    "vertex format {:?} is not supported by the D3D11 backend",
+                    attribute.format
+                ))
+            })?;
+            let offset = u32::try_from(attribute.offset).map_err(|_| {
+                pipeline_error(alloc::format!(
+                    "vertex attribute offset {} does not fit in u32",
+                    attribute.offset
+                ))
+            })?;
+
+            if layout.array_stride != 0
+                && attribute.offset.saturating_add(attribute.format.size()) > layout.array_stride
+            {
+                return Err(pipeline_error(alloc::format!(
+                    "vertex attribute at location {} extends past the stride of slot {slot}",
+                    attribute.shader_location
+                )));
+            }
+
+            elements.push(Direct3D11::D3D11_INPUT_ELEMENT_DESC {
+                SemanticName: PCSTR(semantic.as_ptr().cast()),
+                SemanticIndex: attribute.shader_location,
+                Format: format,
+                InputSlot: slot as u32,
+                AlignedByteOffset: offset,
+                InputSlotClass: input_slot_class,
+                InstanceDataStepRate: step_rate,
+            });
+        }
+    }
+
+    if elements.is_empty() {
+        return Ok((None, strides));
+    }
+
+    let mut raw: Option<Direct3D11::ID3D11InputLayout> = None;
+    unsafe { device.CreateInputLayout(&elements, vertex_bytecode, Some(&mut raw)) }.map_err(
+        |e| {
+            pipeline_error(alloc::format!(
+                "ID3D11Device::CreateInputLayout failed for {} elements: {e}",
+                elements.len()
+            ))
+        },
+    )?;
+
+    let raw = raw.ok_or_else(|| {
+        pipeline_error("ID3D11Device::CreateInputLayout succeeded without returning a layout")
+    })?;
+
+    Ok((Some(raw), strides))
+}
+
+/// Creates the rasterizer state for a render pipeline.
+fn create_rasterizer_state(
+    device: &Direct3D11::ID3D11Device,
+    primitive: &wgt::PrimitiveState,
+    depth_bias: wgt::DepthBiasState,
+) -> Result<Direct3D11::ID3D11RasterizerState, crate::PipelineError> {
+    if primitive.conservative {
+        return Err(pipeline_error(
+            "D3D11 conservative rasterization is not implemented yet",
+        ));
+    }
+
+    let fill_mode = match primitive.polygon_mode {
+        wgt::PolygonMode::Fill => Direct3D11::D3D11_FILL_SOLID,
+        wgt::PolygonMode::Line => Direct3D11::D3D11_FILL_WIREFRAME,
+        wgt::PolygonMode::Point => {
+            return Err(pipeline_error(
+                "D3D11 does not support point polygon fill mode; draw a point topology instead",
+            ));
+        }
+    };
+    let cull_mode = match primitive.cull_mode {
+        None => Direct3D11::D3D11_CULL_NONE,
+        Some(wgt::Face::Front) => Direct3D11::D3D11_CULL_FRONT,
+        Some(wgt::Face::Back) => Direct3D11::D3D11_CULL_BACK,
+    };
+
+    let desc = Direct3D11::D3D11_RASTERIZER_DESC {
+        FillMode: fill_mode,
+        CullMode: cull_mode,
+        FrontCounterClockwise: matches!(primitive.front_face, wgt::FrontFace::Ccw).into(),
+        DepthBias: depth_bias.constant,
+        DepthBiasClamp: depth_bias.clamp,
+        SlopeScaledDepthBias: depth_bias.slope_scale,
+        DepthClipEnable: (!primitive.unclipped_depth).into(),
+        // Scissor rectangles are part of the WebGPU render pass state.
+        ScissorEnable: true.into(),
+        MultisampleEnable: false.into(),
+        AntialiasedLineEnable: false.into(),
+    };
+
+    let mut raw: Option<Direct3D11::ID3D11RasterizerState> = None;
+    unsafe { device.CreateRasterizerState(&desc, Some(&mut raw)) }.map_err(|e| {
+        pipeline_error(alloc::format!(
+            "ID3D11Device::CreateRasterizerState failed: {e}"
+        ))
+    })?;
+    raw.ok_or_else(|| {
+        pipeline_error("ID3D11Device::CreateRasterizerState returned no state object")
+    })
+}
+
+fn default_stencil_face() -> Direct3D11::D3D11_DEPTH_STENCILOP_DESC {
+    Direct3D11::D3D11_DEPTH_STENCILOP_DESC {
+        StencilFailOp: Direct3D11::D3D11_STENCIL_OP_KEEP,
+        StencilDepthFailOp: Direct3D11::D3D11_STENCIL_OP_KEEP,
+        StencilPassOp: Direct3D11::D3D11_STENCIL_OP_KEEP,
+        StencilFunc: Direct3D11::D3D11_COMPARISON_ALWAYS,
+    }
+}
+
+/// Creates the depth/stencil state for a render pipeline.
+///
+/// Pipelines without a depth/stencil state still need a state object so that
+/// binding them disables depth and stencil tests explicitly.
+fn create_depth_stencil_state(
+    device: &Direct3D11::ID3D11Device,
+    depth_stencil: Option<&wgt::DepthStencilState>,
+) -> Result<Direct3D11::ID3D11DepthStencilState, crate::PipelineError> {
+    let desc = match depth_stencil {
+        Some(depth_stencil) => {
+            if !depth_stencil.format.has_depth_aspect()
+                && !depth_stencil.format.has_stencil_aspect()
+            {
+                return Err(pipeline_error(alloc::format!(
+                    "depth/stencil state format {:?} has neither a depth nor a stencil aspect",
+                    depth_stencil.format
+                )));
+            }
+            if depth_stencil.stencil.is_enabled() && !depth_stencil.format.has_stencil_aspect() {
+                return Err(pipeline_error(alloc::format!(
+                    "stencil state is enabled but format {:?} has no stencil aspect",
+                    depth_stencil.format
+                )));
+            }
+
+            Direct3D11::D3D11_DEPTH_STENCIL_DESC {
+                DepthEnable: depth_stencil.is_depth_enabled().into(),
+                DepthWriteMask: if depth_stencil.depth_write_enabled.unwrap_or(false) {
+                    Direct3D11::D3D11_DEPTH_WRITE_MASK_ALL
+                } else {
+                    Direct3D11::D3D11_DEPTH_WRITE_MASK_ZERO
+                },
+                DepthFunc: super::conv::map_comparison(
+                    depth_stencil
+                        .depth_compare
+                        .unwrap_or(wgt::CompareFunction::Always),
+                ),
+                StencilEnable: depth_stencil.stencil.is_enabled().into(),
+                StencilReadMask: depth_stencil.stencil.read_mask as u8,
+                StencilWriteMask: depth_stencil.stencil.write_mask as u8,
+                FrontFace: super::conv::map_stencil_face(&depth_stencil.stencil.front),
+                BackFace: super::conv::map_stencil_face(&depth_stencil.stencil.back),
+            }
+        }
+        None => Direct3D11::D3D11_DEPTH_STENCIL_DESC {
+            DepthEnable: false.into(),
+            DepthWriteMask: Direct3D11::D3D11_DEPTH_WRITE_MASK_ZERO,
+            DepthFunc: Direct3D11::D3D11_COMPARISON_ALWAYS,
+            StencilEnable: false.into(),
+            StencilReadMask: 0,
+            StencilWriteMask: 0,
+            FrontFace: default_stencil_face(),
+            BackFace: default_stencil_face(),
+        },
+    };
+
+    let mut raw: Option<Direct3D11::ID3D11DepthStencilState> = None;
+    unsafe { device.CreateDepthStencilState(&desc, Some(&mut raw)) }.map_err(|e| {
+        pipeline_error(alloc::format!(
+            "ID3D11Device::CreateDepthStencilState failed: {e}"
+        ))
+    })?;
+    raw.ok_or_else(|| {
+        pipeline_error("ID3D11Device::CreateDepthStencilState returned no state object")
+    })
+}
+
+/// Creates the blend state for a render pipeline.
+fn create_blend_state(
+    device: &Direct3D11::ID3D11Device,
+    color_targets: &[Option<wgt::ColorTargetState>],
+) -> Result<Direct3D11::ID3D11BlendState, crate::PipelineError> {
+    if color_targets.len() > Direct3D11::D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT as usize {
+        return Err(pipeline_error(alloc::format!(
+            "D3D11 render pipelines support at most {} color targets, got {}",
+            Direct3D11::D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,
+            color_targets.len()
+        )));
+    }
+
+    let disabled = Direct3D11::D3D11_RENDER_TARGET_BLEND_DESC {
+        BlendEnable: false.into(),
+        SrcBlend: Direct3D11::D3D11_BLEND_ONE,
+        DestBlend: Direct3D11::D3D11_BLEND_ZERO,
+        BlendOp: Direct3D11::D3D11_BLEND_OP_ADD,
+        SrcBlendAlpha: Direct3D11::D3D11_BLEND_ONE,
+        DestBlendAlpha: Direct3D11::D3D11_BLEND_ZERO,
+        BlendOpAlpha: Direct3D11::D3D11_BLEND_OP_ADD,
+        RenderTargetWriteMask: 0,
+    };
+    let mut desc = Direct3D11::D3D11_BLEND_DESC {
+        AlphaToCoverageEnable: false.into(),
+        IndependentBlendEnable: true.into(),
+        RenderTarget: [disabled; Direct3D11::D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT as usize],
+    };
+
+    for (index, target) in color_targets.iter().enumerate() {
+        let Some(target) = target else {
+            continue;
+        };
+
+        let raw = &mut desc.RenderTarget[index];
+        raw.RenderTargetWriteMask = (target.write_mask.bits() & 0xF) as u8;
+
+        if let Some(blend) = &target.blend {
+            raw.BlendEnable = true.into();
+            raw.BlendOp = super::conv::map_blend_operation(blend.color.operation);
+            raw.SrcBlend = super::conv::map_blend_factor(blend.color.src_factor, false)
+                .ok_or_else(|| {
+                    pipeline_error("D3D11 dual-source blending is not implemented yet")
+                })?;
+            raw.DestBlend = super::conv::map_blend_factor(blend.color.dst_factor, false)
+                .ok_or_else(|| {
+                    pipeline_error("D3D11 dual-source blending is not implemented yet")
+                })?;
+            raw.BlendOpAlpha = super::conv::map_blend_operation(blend.alpha.operation);
+            raw.SrcBlendAlpha = super::conv::map_blend_factor(blend.alpha.src_factor, true)
+                .ok_or_else(|| {
+                    pipeline_error("D3D11 dual-source blending is not implemented yet")
+                })?;
+            raw.DestBlendAlpha = super::conv::map_blend_factor(blend.alpha.dst_factor, true)
+                .ok_or_else(|| {
+                    pipeline_error("D3D11 dual-source blending is not implemented yet")
+                })?;
+        }
+    }
+
+    let mut raw: Option<Direct3D11::ID3D11BlendState> = None;
+    unsafe { device.CreateBlendState(&desc, Some(&mut raw)) }.map_err(|e| {
+        pipeline_error(alloc::format!("ID3D11Device::CreateBlendState failed: {e}"))
+    })?;
+    raw.ok_or_else(|| pipeline_error("ID3D11Device::CreateBlendState returned no state object"))
 }
 
 impl crate::Device for Device {
@@ -814,12 +1126,210 @@ impl crate::Device for Device {
 
     unsafe fn create_render_pipeline(
         &self,
-        _desc: &crate::RenderPipelineDescriptor<PipelineLayout, ShaderModule, PipelineCache>,
-    ) -> Result<Resource, crate::PipelineError> {
-        unimplemented!("D3D11 render pipeline creation is not implemented yet")
+        desc: &crate::RenderPipelineDescriptor<PipelineLayout, ShaderModule, PipelineCache>,
+    ) -> Result<RenderPipeline, crate::PipelineError> {
+        let (vertex_buffers, vertex_stage) = match &desc.vertex_processor {
+            crate::VertexProcessor::Standard {
+                vertex_buffers,
+                vertex_stage,
+            } => (*vertex_buffers, vertex_stage),
+            crate::VertexProcessor::Mesh { .. } => {
+                return Err(pipeline_error(
+                    "D3D11 mesh shader pipelines are not implemented",
+                ));
+            }
+        };
+
+        if desc.multiview_mask.is_some() {
+            return Err(pipeline_error(
+                "D3D11 multiview render pipelines are not implemented",
+            ));
+        }
+        if desc.multisample.count != 1 {
+            return Err(pipeline_error(alloc::format!(
+                "D3D11 currently supports render pipelines with sample_count == 1 only, got {}",
+                desc.multisample.count
+            )));
+        }
+        if desc.multisample.mask & 1 == 0 {
+            return Err(pipeline_error(
+                "D3D11 render pipeline sample mask disables the only sample",
+            ));
+        }
+        if desc.multisample.alpha_to_coverage_enabled {
+            return Err(pipeline_error(
+                "D3D11 alpha-to-coverage is not implemented yet",
+            ));
+        }
+        if desc.primitive.strip_index_format.is_some() {
+            return Err(pipeline_error(
+                "D3D11 indexed strip primitive restart is not implemented",
+            ));
+        }
+        if desc.color_targets.len() > Direct3D11::D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT as usize {
+            return Err(pipeline_error(alloc::format!(
+                "D3D11 render pipelines support at most {} color targets, got {}",
+                Direct3D11::D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,
+                desc.color_targets.len()
+            )));
+        }
+
+        let vertex = vertex_stage
+            .module
+            .compile(
+                vertex_stage.entry_point,
+                naga::ShaderStage::Vertex,
+                desc.layout,
+                vertex_stage.constants,
+            )
+            .map_err(|e| crate::PipelineError::Linkage(wgt::ShaderStages::VERTEX, e.to_string()))?;
+
+        let fragment = match desc.fragment_stage.as_ref() {
+            Some(stage) => Some(
+                stage
+                    .module
+                    .compile(
+                        stage.entry_point,
+                        naga::ShaderStage::Fragment,
+                        desc.layout,
+                        stage.constants,
+                    )
+                    .map_err(|e| {
+                        crate::PipelineError::Linkage(wgt::ShaderStages::FRAGMENT, e.to_string())
+                    })?,
+            ),
+            None => None,
+        };
+
+        let mut raw_vertex_shader: Option<Direct3D11::ID3D11VertexShader> = None;
+        unsafe {
+            self.raw_device
+                .CreateVertexShader(&vertex.bytecode, None, Some(&mut raw_vertex_shader))
+        }
+        .map_err(|e| {
+            log::error!("ID3D11Device::CreateVertexShader failed: {e}");
+            crate::PipelineError::Device(crate::DeviceError::Unexpected)
+        })?;
+        let vertex_shader = raw_vertex_shader.ok_or_else(|| {
+            pipeline_error("ID3D11Device::CreateVertexShader returned no shader object")
+        })?;
+
+        let pixel_shader = match &fragment {
+            Some(fragment) => {
+                let mut raw_pixel_shader: Option<Direct3D11::ID3D11PixelShader> = None;
+                unsafe {
+                    self.raw_device.CreatePixelShader(
+                        &fragment.bytecode,
+                        None,
+                        Some(&mut raw_pixel_shader),
+                    )
+                }
+                .map_err(|e| {
+                    log::error!("ID3D11Device::CreatePixelShader failed: {e}");
+                    crate::PipelineError::Device(crate::DeviceError::Unexpected)
+                })?;
+                Some(raw_pixel_shader.ok_or_else(|| {
+                    pipeline_error("ID3D11Device::CreatePixelShader returned no shader object")
+                })?)
+            }
+            None => None,
+        };
+
+        let (input_layout, vertex_strides) =
+            create_input_layout(&self.raw_device, vertex_buffers, &vertex.bytecode)?;
+
+        let mut color_formats: Vec<Option<Dxgi::Common::DXGI_FORMAT>> =
+            Vec::with_capacity(desc.color_targets.len());
+        for target in desc.color_targets {
+            match target {
+                Some(target) => {
+                    if !target.format.has_color_aspect() {
+                        return Err(pipeline_error(alloc::format!(
+                            "color target format {:?} has no color aspect",
+                            target.format
+                        )));
+                    }
+                    let format =
+                        super::conv::map_texture_format(target.format).ok_or_else(|| {
+                            pipeline_error(alloc::format!(
+                                "color target format {:?} is not supported by the D3D11 backend",
+                                target.format
+                            ))
+                        })?;
+                    color_formats.push(Some(format));
+                }
+                None => color_formats.push(None),
+            }
+        }
+
+        let depth_format = match desc.depth_stencil.as_ref() {
+            Some(depth_stencil) => {
+                if !depth_stencil.format.has_depth_aspect()
+                    && !depth_stencil.format.has_stencil_aspect()
+                {
+                    return Err(pipeline_error(alloc::format!(
+                        "depth/stencil format {:?} has neither a depth nor a stencil aspect",
+                        depth_stencil.format
+                    )));
+                }
+                if depth_stencil.stencil.is_enabled() && !depth_stencil.format.has_stencil_aspect()
+                {
+                    return Err(pipeline_error(alloc::format!(
+                        "stencil state is enabled but depth/stencil format {:?} has no stencil aspect",
+                        depth_stencil.format
+                    )));
+                }
+                Some(
+                    super::conv::map_texture_format(depth_stencil.format).ok_or_else(|| {
+                        pipeline_error(alloc::format!(
+                            "depth/stencil format {:?} is not supported by the D3D11 backend",
+                            depth_stencil.format
+                        ))
+                    })?,
+                )
+            }
+            None => None,
+        };
+
+        let topology = super::conv::map_primitive_topology(desc.primitive.topology);
+        let depth_bias = desc
+            .depth_stencil
+            .as_ref()
+            .map_or(wgt::DepthBiasState::default(), |state| state.bias);
+        let rasterizer_state =
+            create_rasterizer_state(&self.raw_device, &desc.primitive, depth_bias)?;
+        let depth_stencil_state =
+            create_depth_stencil_state(&self.raw_device, desc.depth_stencil.as_ref())?;
+        let blend_state = create_blend_state(&self.raw_device, desc.color_targets)?;
+
+        let pipeline = RenderPipeline::new(
+            desc.label.map(alloc::string::String::from),
+            vertex_shader,
+            pixel_shader,
+            input_layout,
+            rasterizer_state,
+            depth_stencil_state,
+            blend_state,
+            topology,
+            vertex_strides,
+            color_formats,
+            depth_format,
+            desc.multisample.count,
+            (desc.multisample.mask & u32::MAX as u64) as u32,
+        );
+
+        log::debug!(
+            "created D3D11 render pipeline {:?} with topology {:?}",
+            desc.label,
+            desc.primitive.topology
+        );
+
+        Ok(pipeline)
     }
 
-    unsafe fn destroy_render_pipeline(&self, _pipeline: Resource) {}
+    unsafe fn destroy_render_pipeline(&self, pipeline: RenderPipeline) {
+        drop(pipeline);
+    }
 
     unsafe fn create_compute_pipeline(
         &self,

@@ -20,8 +20,9 @@ provides compilable stubs for the rest of the `wgpu-hal` API.
   `DXGI_SWAP_EFFECT_FLIP_DISCARD` swap chain with two BGRA8 back buffers and a
   render-target view for each buffer.
 - [`CommandBuffer::begin_render_pass`](crate::CommandEncoder::begin_render_pass)
-  clears color attachments immediately on the immediate context. The
-  `raw-dx11-window` example uses this to clear and present frames.
+  binds real render-target and depth-stencil views with `OMSetRenderTargets` and
+  applies the requested clears. Render pipelines and draw commands are executed
+  on the immediate context.
 - [`Device::create_buffer`](crate::Device::create_buffer),
   [`Device::create_texture`](crate::Device::create_texture),
   [`Device::create_texture_view`](crate::Device::create_texture_view) and
@@ -32,22 +33,29 @@ provides compilable stubs for the rest of the `wgpu-hal` API.
   [`Device::create_pipeline_layout`](crate::Device::create_pipeline_layout) and
   [`Device::create_bind_group`](crate::Device::create_bind_group) create CPU-side
   bind group objects. Registers are flattened into separate `b`/`t`/`u`/`s`
-  counters in the pipeline layout; nothing is bound to the context yet.
+  counters in the pipeline layout; [`CommandEncoder::set_bind_group`](crate::CommandEncoder::set_bind_group)
+  binds their uniform buffers, textures and samplers.
 - [`Device::create_shader_module`](crate::Device::create_shader_module) stores
   Naga IR or HLSL source. [`compile_shader`] translates Naga IR to HLSL with
   direct sampler registers and compiles it with FXC for Shader Model 5.0. The
   `raw-dx11-shader` example exercises this path.
-- Render/compute pipelines, draws, dispatches and real bind-group binding are
-  still stubs. Their creation methods call `unimplemented!` or are no-ops.
+- [`Device::create_render_pipeline`](crate::Device::create_render_pipeline)
+  creates the vertex/pixel shader objects, input layout, rasterizer state,
+  depth-stencil state and blend state. The `raw-dx11-triangle` example draws one
+  triangle offscreen and verifies the result by readback.
+- Compute pipelines, dispatches, queries, push constants and deferred command
+  lists are still stubs. There is no MSAA, multiview, mesh-shader or
+  storage-buffer binding yet. Non-zero uniform buffer offsets require
+  `ID3D11DeviceContext1` and must describe 256-byte-aligned constant-buffer
+  windows; otherwise the binding is rejected with an explicit error log.
+  Vertex input layouts use Naga's `LOC<location>` semantics.
 
 ## Next steps
 
-The next milestone is render pipelines: create D3D11 shader objects from the
-compiled bytecode, define input layouts and rasterizer/depth-stencil state, and
-bind the CPU-side bind groups from
-[`CommandEncoder::set_bind_group`](crate::CommandEncoder::set_bind_group).
-Command encoding and submission also still need deferred contexts so recorded
-work is executed in order from [`Queue::submit`](crate::Queue::submit).
+The next milestone is compute pipelines and dispatches, followed by deferred
+contexts so command recording and submission can be separated. Current command
+encoding still executes immediately on the immediate context and
+[`Queue::submit`](crate::Queue::submit) only flushes it.
 */
 
 #![allow(unused_variables)]
@@ -72,8 +80,8 @@ pub use surface::Surface;
 pub(crate) use types::BufferMapMode;
 pub use types::{
     BindGroup, BindGroupLayout, BindGroupLayoutEntry, BoundBuffer, BoundSampler, BoundTexture,
-    Buffer, Fence, PipelineCache, PipelineLayout, Resource, Sampler, SurfaceTexture, Texture,
-    TextureView,
+    Buffer, Fence, PipelineCache, PipelineLayout, RenderPipeline, Resource, Sampler,
+    SurfaceTexture, Texture, TextureView,
 };
 
 /// The D3D11 backend marker type.
@@ -104,7 +112,7 @@ impl crate::Api for Api {
     type BindGroup = BindGroup;
     type PipelineLayout = PipelineLayout;
     type ShaderModule = ShaderModule;
-    type RenderPipeline = Resource;
+    type RenderPipeline = RenderPipeline;
     type ComputePipeline = Resource;
     type RayTracingPipeline = Resource;
     type PipelineCache = PipelineCache;
@@ -124,6 +132,7 @@ crate::impl_dyn_resource!(
     PipelineCache,
     PipelineLayout,
     Queue,
+    RenderPipeline,
     Resource,
     Sampler,
     ShaderModule,
@@ -143,7 +152,7 @@ impl crate::DynFence for Fence {}
 impl crate::DynPipelineCache for PipelineCache {}
 impl crate::DynPipelineLayout for PipelineLayout {}
 impl crate::DynQuerySet for Resource {}
-impl crate::DynRenderPipeline for Resource {}
+impl crate::DynRenderPipeline for RenderPipeline {}
 impl crate::DynRayTracingPipeline for Resource {}
 impl crate::DynSampler for Sampler {}
 impl crate::DynShaderModule for ShaderModule {}

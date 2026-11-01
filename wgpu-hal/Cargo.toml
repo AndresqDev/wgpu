@@ -137,9 +137,10 @@ gles = [
 ## Enables the experimental DX11 backend when targeting Windows.
 ##
 ## Currently this provides DXGI adapter enumeration, `D3D11CreateDevice` based
-## device creation, a windowed flip-model swap chain, clear-only render passes
-## and presentation, real buffers/textures/samplers, CPU-side bind groups and
-## FXC shader compilation. Render pipelines and draws are still stubs.
+## device creation, a windowed flip-model swap chain, clear/present render
+## passes, real buffers/textures/samplers, CPU-side bind groups, FXC shader
+## compilation, render pipelines and draws. Compute pipelines, queries and
+## deferred command lists are still stubs.
 dx11 = [
     "dep:arrayvec",
     "dep:bytemuck",
@@ -240,6 +241,10 @@ required-features = ["dx11"]
 
 [[example]]
 name = "raw-dx11-shader"
+required-features = ["dx11"]
+
+[[example]]
+name = "raw-dx11-triangle"
 required-features = ["dx11"]
 
 #####################

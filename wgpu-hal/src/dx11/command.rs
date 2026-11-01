@@ -2,24 +2,34 @@
 //!
 //! D3D11 records commands on an `ID3D11DeviceContext`. This milestone does not
 //! create deferred contexts yet: the encoder keeps a clone of the device's
-//! immediate context and executes supported commands (buffer/texture copies and
-//! render-pass clears) as soon as they are recorded. [`crate::Queue::submit`]
-//! then flushes that context.
+//! immediate context and executes supported commands immediately as they are
+//! recorded. [`crate::Queue::submit`] then flushes that context.
 //!
-//! This means the clear becomes visible before the command buffer is submitted,
-//! which is fine for the clear/present milestone but not the final design.
-//! Deferred contexts and ordered command-list execution are the next step.
+//! Render pipelines, render-pass attachments, bind groups, vertex/index
+//! buffers and draw calls are now forwarded to the immediate context. Dynamic
+//! uniform offsets use `ID3D11DeviceContext1::*SetConstantBuffers1`; when that
+//! interface is unavailable, or when the requested offset cannot be expressed
+//! with D3D11.1's 256-byte-aligned constant-buffer windows, the binding is
+//! rejected explicitly instead of being silently mis-bound.
+//!
+//! Push constants (`set_immediates`) remain a documented no-op until the
+//! emitter and pipeline layouts agree on a dedicated immediate constant
+//! buffer.
 
 use alloc::vec::Vec;
 use core::{ffi::c_void, ops::Range, ptr};
 
-use windows::Win32::{
-    Foundation,
-    Graphics::{Direct3D11, Dxgi},
+use windows::{
+    core::Interface as _,
+    Win32::{
+        Foundation,
+        Graphics::{Direct3D11, Dxgi},
+    },
 };
 
 use super::{
-    Api, BindGroup, Buffer, BufferMapMode, PipelineLayout, Resource, Texture, TextureView,
+    Api, BindGroup, Buffer, BufferMapMode, PipelineLayout, RenderPipeline, Resource, Texture,
+    TextureView,
 };
 
 /// D3D11 requires staging buffer sizes to be a multiple of four bytes.
@@ -135,15 +145,49 @@ fn bytes_per_row(
     Some((pitch, row_bytes, block_height))
 }
 
+/// Pipeline state that the encoder needs while recording draw commands.
+#[derive(Clone, Debug)]
+struct PipelineState {
+    vertex_strides: Vec<Option<u32>>,
+}
+
+/// Attachment formats captured by `begin_render_pass` for pipeline checks.
+#[derive(Clone, Debug)]
+struct RenderPassState {
+    color_formats: Vec<Option<Dxgi::Common::DXGI_FORMAT>>,
+    depth_format: Option<Dxgi::Common::DXGI_FORMAT>,
+    sample_count: u32,
+}
+
+/// Returns the next register slot for a possibly arrayed binding.
+fn next_binding_slot(counts: &mut Vec<(u32, u32)>, binding: u32, base: u32) -> u32 {
+    if let Some(entry) = counts.iter_mut().find(|(bound, _)| *bound == binding) {
+        let slot = base + entry.1;
+        entry.1 += 1;
+        slot
+    } else {
+        counts.push((binding, 1));
+        base
+    }
+}
+
 /// Command buffer type, which also acts as the command encoder.
 ///
 /// Keeping a single type for both roles follows the structure of the noop
-/// backend and avoids maintaining two state machines before command recording
-/// is implemented.
+/// backend and avoids maintaining two state machines before deferred command
+/// lists are implemented.
 #[derive(Debug)]
 pub struct CommandBuffer {
     context: Direct3D11::ID3D11DeviceContext,
+    context1: Option<Direct3D11::ID3D11DeviceContext1>,
     device: Direct3D11::ID3D11Device,
+    current_pipeline: Option<PipelineState>,
+    current_blend_state: Option<Direct3D11::ID3D11BlendState>,
+    current_depth_stencil_state: Option<Direct3D11::ID3D11DepthStencilState>,
+    blend_constants: [f32; 4],
+    sample_mask: u32,
+    stencil_reference: u32,
+    render_pass: Option<RenderPassState>,
 }
 
 impl CommandBuffer {
@@ -151,7 +195,19 @@ impl CommandBuffer {
         context: Direct3D11::ID3D11DeviceContext,
         device: Direct3D11::ID3D11Device,
     ) -> Self {
-        Self { context, device }
+        let context1 = context.cast::<Direct3D11::ID3D11DeviceContext1>().ok();
+        Self {
+            context,
+            context1,
+            device,
+            current_pipeline: None,
+            current_blend_state: None,
+            current_depth_stencil_state: None,
+            blend_constants: [0.0; 4],
+            sample_mask: u32::MAX,
+            stencil_reference: 0,
+            render_pass: None,
+        }
     }
 }
 
@@ -681,10 +737,119 @@ impl crate::CommandEncoder for CommandBuffer {
         &mut self,
         desc: &crate::RenderPassDescriptor<Resource, TextureView>,
     ) -> Result<(), crate::DeviceError> {
+        if self.render_pass.is_some() {
+            log::error!("a D3D11 render pass is already active");
+            return Err(crate::DeviceError::Unexpected);
+        }
+        if desc.sample_count != 1 {
+            log::error!(
+                "D3D11 render passes currently support sample_count == 1 only, got {}",
+                desc.sample_count
+            );
+            return Err(crate::DeviceError::Unexpected);
+        }
+        if desc.multiview_mask.is_some() {
+            log::error!("D3D11 multiview render passes are not implemented");
+            return Err(crate::DeviceError::Unexpected);
+        }
+        if desc.color_attachments.len()
+            > Direct3D11::D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT as usize
+        {
+            log::error!(
+                "D3D11 render passes support at most {} color attachments, got {}",
+                Direct3D11::D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,
+                desc.color_attachments.len()
+            );
+            return Err(crate::DeviceError::Unexpected);
+        }
+
+        let mut render_targets: Vec<Option<Direct3D11::ID3D11RenderTargetView>> = Vec::new();
+        let mut color_formats: Vec<Option<Dxgi::Common::DXGI_FORMAT>> =
+            Vec::with_capacity(desc.color_attachments.len());
+
+        for attachment in desc.color_attachments {
+            let Some(attachment) = attachment else {
+                render_targets.push(None);
+                color_formats.push(None);
+                continue;
+            };
+
+            if attachment.depth_slice.is_some() {
+                log::error!("D3D11 3D render target slices are not implemented");
+                return Err(crate::DeviceError::Unexpected);
+            }
+            if attachment.resolve_target.is_some() {
+                log::error!("D3D11 multisampled resolve targets are not implemented");
+                return Err(crate::DeviceError::Unexpected);
+            }
+            if !attachment
+                .target
+                .usage
+                .contains(wgt::TextureUses::COLOR_TARGET)
+            {
+                log::error!(
+                    "D3D11 color attachment usage {:?} is not COLOR_TARGET",
+                    attachment.target.usage
+                );
+                return Err(crate::DeviceError::Unexpected);
+            }
+
+            let Some(rtv) = attachment.target.view.raw_rtv() else {
+                log::error!("D3D11 color attachment view has no render target view");
+                return Err(crate::DeviceError::Unexpected);
+            };
+            render_targets.push(Some(rtv.clone()));
+            color_formats.push(Some(attachment.target.view.format()));
+        }
+
+        // D3D11 accepts NULL entries in the render target array, but leaving
+        // trailing NULLs out keeps the call and debug output smaller.
+        while matches!(render_targets.last(), Some(None)) {
+            render_targets.pop();
+        }
+
+        let depth_stencil = desc.depth_stencil_attachment.as_ref();
+        let depth_format = match depth_stencil {
+            Some(depth_stencil) => {
+                if !depth_stencil.target.usage.intersects(
+                    wgt::TextureUses::DEPTH_STENCIL_READ | wgt::TextureUses::DEPTH_STENCIL_WRITE,
+                ) {
+                    log::error!(
+                        "D3D11 depth attachment usage {:?} is not a depth/stencil usage",
+                        depth_stencil.target.usage
+                    );
+                    return Err(crate::DeviceError::Unexpected);
+                }
+                if depth_stencil.target.view.raw_dsv().is_none() {
+                    log::error!("D3D11 depth attachment view has no depth stencil view");
+                    return Err(crate::DeviceError::Unexpected);
+                }
+                Some(depth_stencil.target.view.format())
+            }
+            None => None,
+        };
+
+        if render_targets.is_empty() && depth_stencil.is_none() {
+            log::error!("D3D11 render pass has no attachments");
+            return Err(crate::DeviceError::Unexpected);
+        }
+
+        let depth_stencil_view = depth_stencil
+            .and_then(|attachment| attachment.target.view.raw_dsv())
+            .cloned();
+
+        unsafe {
+            self.context.OMSetRenderTargets(
+                if render_targets.is_empty() {
+                    None
+                } else {
+                    Some(render_targets.as_slice())
+                },
+                depth_stencil_view.as_ref(),
+            );
+        }
+
         for attachment in desc.color_attachments.iter().flatten() {
-            // D3D11 clears do not require the render target to be bound, so the
-            // pass can stay a no-op apart from the clear. `LOAD`/`STORE` and
-            // actual draw operations are not implemented yet.
             if attachment.ops.contains(crate::AttachmentOps::LOAD_CLEAR) {
                 let color = attachment.clear_value;
                 let color = [
@@ -693,25 +858,347 @@ impl crate::CommandEncoder for CommandBuffer {
                     color.b as f32,
                     color.a as f32,
                 ];
+                if let Some(rtv) = attachment.target.view.raw_rtv() {
+                    unsafe { self.context.ClearRenderTargetView(rtv, &color) };
+                }
+            }
+        }
+
+        if let Some(depth_stencil) = depth_stencil {
+            let mut clear_flags = 0u32;
+            if depth_stencil
+                .depth_ops
+                .contains(crate::AttachmentOps::LOAD_CLEAR)
+            {
+                clear_flags |= Direct3D11::D3D11_CLEAR_DEPTH.0;
+            }
+            if depth_stencil
+                .stencil_ops
+                .contains(crate::AttachmentOps::LOAD_CLEAR)
+            {
+                clear_flags |= Direct3D11::D3D11_CLEAR_STENCIL.0;
+            }
+
+            if clear_flags != 0 {
+                if let Some(dsv) = depth_stencil.target.view.raw_dsv() {
+                    unsafe {
+                        self.context.ClearDepthStencilView(
+                            dsv,
+                            clear_flags,
+                            depth_stencil.clear_value.0,
+                            depth_stencil.clear_value.1 as u8,
+                        )
+                    };
+                }
+            }
+        }
+
+        let viewport = Direct3D11::D3D11_VIEWPORT {
+            TopLeftX: 0.0,
+            TopLeftY: 0.0,
+            Width: desc.extent.width as f32,
+            Height: desc.extent.height as f32,
+            MinDepth: 0.0,
+            MaxDepth: 1.0,
+        };
+        let scissor = Foundation::RECT {
+            left: 0,
+            top: 0,
+            right: i32::try_from(desc.extent.width).unwrap_or(i32::MAX),
+            bottom: i32::try_from(desc.extent.height).unwrap_or(i32::MAX),
+        };
+        unsafe {
+            self.context.RSSetViewports(Some(&[viewport]));
+            self.context.RSSetScissorRects(Some(&[scissor]));
+        }
+
+        self.render_pass = Some(RenderPassState {
+            color_formats,
+            depth_format,
+            sample_count: desc.sample_count,
+        });
+
+        Ok(())
+    }
+
+    unsafe fn end_render_pass(&mut self) {
+        unsafe {
+            self.context.OMSetRenderTargets(
+                None::<&[Option<Direct3D11::ID3D11RenderTargetView>]>,
+                None::<&Direct3D11::ID3D11DepthStencilView>,
+            );
+        }
+        self.render_pass = None;
+        self.current_pipeline = None;
+    }
+
+    unsafe fn set_bind_group(
+        &mut self,
+        layout: &PipelineLayout,
+        index: u32,
+        group: &BindGroup,
+        dynamic_offsets: &[wgt::DynamicOffset],
+    ) {
+        let Some(Some(group_layout)) = layout.bind_group_layouts().get(index as usize) else {
+            log::error!("D3D11 set_bind_group called for missing bind group {index}");
+            return;
+        };
+        if dynamic_offsets.len() != group_layout.dynamic_offsets().len() {
+            log::error!(
+                "D3D11 bind group {index} expects {} dynamic offsets, got {}",
+                group_layout.dynamic_offsets().len(),
+                dynamic_offsets.len()
+            );
+            return;
+        }
+
+        let mut array_counts = Vec::new();
+
+        for bound in group.buffers() {
+            let Some(entry) = group_layout.entry(bound.binding) else {
+                log::error!(
+                    "D3D11 bind group has no layout entry for binding {}",
+                    bound.binding
+                );
+                continue;
+            };
+            let (ty, has_dynamic_offset) = match entry.ty {
+                wgt::BindingType::Buffer {
+                    ty,
+                    has_dynamic_offset,
+                    ..
+                } => (ty, has_dynamic_offset),
+                _ => {
+                    log::error!(
+                        "D3D11 binding {} is not a buffer binding in the bind group layout",
+                        bound.binding
+                    );
+                    continue;
+                }
+            };
+            if ty != wgt::BufferBindingType::Uniform {
+                log::error!(
+                    "D3D11 storage buffer binding {} is not implemented yet; only uniform buffers can be bound",
+                    bound.binding
+                );
+                continue;
+            }
+
+            let Some(target) = layout.bind_target(index, bound.binding) else {
+                log::error!(
+                    "D3D11 pipeline layout has no register for group {index} binding {}",
+                    bound.binding
+                );
+                continue;
+            };
+            let slot = next_binding_slot(&mut array_counts, bound.binding, target.register);
+            if slot >= Direct3D11::D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT {
+                log::error!("D3D11 constant buffer register {slot} is outside the supported range");
+                continue;
+            }
+
+            let dynamic_offset = if has_dynamic_offset {
+                let Some(position) = group_layout
+                    .dynamic_offsets()
+                    .iter()
+                    .position(|binding| *binding == bound.binding)
+                else {
+                    log::error!(
+                        "D3D11 dynamic binding {} has no dynamic offset slot",
+                        bound.binding
+                    );
+                    continue;
+                };
+                let Some(offset) = dynamic_offsets.get(position) else {
+                    log::error!(
+                        "D3D11 dynamic binding {} is missing its dynamic offset",
+                        bound.binding
+                    );
+                    continue;
+                };
+                *offset as u64
+            } else {
+                0
+            };
+
+            let Some(offset) = bound.offset.checked_add(dynamic_offset) else {
+                log::error!("D3D11 uniform buffer offset overflowed");
+                continue;
+            };
+            let size = bound
+                .size
+                .unwrap_or_else(|| bound.buffer.size().saturating_sub(offset));
+            let Some(end) = offset.checked_add(size) else {
+                log::error!("D3D11 uniform buffer range overflowed");
+                continue;
+            };
+            if size == 0 || end > bound.buffer.size() {
+                log::error!(
+                    "D3D11 uniform buffer range {offset}..{end} is outside the buffer of {} bytes",
+                    bound.buffer.size()
+                );
+                continue;
+            }
+            if offset % 16 != 0 || size % 16 != 0 {
+                log::error!(
+                    "D3D11 uniform buffer ranges must be 16-byte aligned, got offset {offset} and size {size}"
+                );
+                continue;
+            }
+
+            let buffers = [Some(bound.buffer.raw().clone())];
+            if offset == 0 {
+                if entry.visibility.contains(wgt::ShaderStages::VERTEX) {
+                    unsafe { self.context.VSSetConstantBuffers(slot, Some(&buffers)) };
+                }
+                if entry.visibility.contains(wgt::ShaderStages::FRAGMENT) {
+                    unsafe { self.context.PSSetConstantBuffers(slot, Some(&buffers)) };
+                }
+                continue;
+            }
+
+            let Some(context1) = self.context1.as_ref() else {
+                log::error!(
+                    "D3D11 constant buffer binding {} has offset {offset}, but ID3D11DeviceContext1 is unavailable",
+                    bound.binding
+                );
+                continue;
+            };
+            // D3D11.1 expresses constant buffer windows in 16-constant
+            // (256-byte) units. Reject windows that cannot be represented
+            // instead of rounding outside the WebGPU binding range.
+            if offset % 256 != 0 || size % 256 != 0 {
+                log::error!(
+                    "D3D11 constant buffer offsets must be 256-byte aligned, got offset {offset} and size {size}"
+                );
+                continue;
+            }
+            let first_constant = match u32::try_from(offset / 16) {
+                Ok(value) => value,
+                Err(_) => {
+                    log::error!("D3D11 constant buffer offset {offset} does not fit in u32");
+                    continue;
+                }
+            };
+            let num_constants = match u32::try_from(size / 16) {
+                Ok(value) => value,
+                Err(_) => {
+                    log::error!("D3D11 constant buffer size {size} does not fit in u32");
+                    continue;
+                }
+            };
+            let end_constant = first_constant.saturating_add(num_constants);
+            if end_constant > 4096 {
+                log::error!(
+                    "D3D11 constant buffer window {first_constant}..{end_constant} exceeds 4096 constants"
+                );
+                continue;
+            }
+
+            let first_constants = [first_constant];
+            let num_constants = [num_constants];
+            if entry.visibility.contains(wgt::ShaderStages::VERTEX) {
                 unsafe {
-                    self.context
-                        .ClearRenderTargetView(attachment.target.view.raw(), &color)
+                    context1.VSSetConstantBuffers1(
+                        slot,
+                        1,
+                        Some(buffers.as_ptr()),
+                        Some(first_constants.as_ptr()),
+                        Some(num_constants.as_ptr()),
+                    )
+                };
+            }
+            if entry.visibility.contains(wgt::ShaderStages::FRAGMENT) {
+                unsafe {
+                    context1.PSSetConstantBuffers1(
+                        slot,
+                        1,
+                        Some(buffers.as_ptr()),
+                        Some(first_constants.as_ptr()),
+                        Some(num_constants.as_ptr()),
+                    )
                 };
             }
         }
 
-        Ok(())
-    }
-    unsafe fn end_render_pass(&mut self) {}
+        for bound in group.textures() {
+            let Some(entry) = group_layout.entry(bound.binding) else {
+                log::error!(
+                    "D3D11 bind group has no layout entry for binding {}",
+                    bound.binding
+                );
+                continue;
+            };
+            if !matches!(entry.ty, wgt::BindingType::Texture { .. }) {
+                log::error!(
+                    "D3D11 binding {} is not a texture binding in the bind group layout",
+                    bound.binding
+                );
+                continue;
+            }
+            let Some(target) = layout.bind_target(index, bound.binding) else {
+                log::error!(
+                    "D3D11 pipeline layout has no register for group {index} binding {}",
+                    bound.binding
+                );
+                continue;
+            };
+            let slot = next_binding_slot(&mut array_counts, bound.binding, target.register);
+            if slot >= Direct3D11::D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT {
+                log::error!("D3D11 shader resource register {slot} is outside the supported range");
+                continue;
+            }
+            let Some(srv) = bound.view.raw_srv() else {
+                log::error!(
+                    "D3D11 texture binding {} has no shader resource view",
+                    bound.binding
+                );
+                continue;
+            };
+            let views = [Some(srv.clone())];
+            if entry.visibility.contains(wgt::ShaderStages::VERTEX) {
+                unsafe { self.context.VSSetShaderResources(slot, Some(&views)) };
+            }
+            if entry.visibility.contains(wgt::ShaderStages::FRAGMENT) {
+                unsafe { self.context.PSSetShaderResources(slot, Some(&views)) };
+            }
+        }
 
-    unsafe fn set_bind_group(
-        &mut self,
-        _layout: &PipelineLayout,
-        _index: u32,
-        _group: &BindGroup,
-        _dynamic_offsets: &[wgt::DynamicOffset],
-    ) {
-        // Bind groups are CPU-side descriptions until render pipelines exist.
+        for bound in group.samplers() {
+            let Some(entry) = group_layout.entry(bound.binding) else {
+                log::error!(
+                    "D3D11 bind group has no layout entry for binding {}",
+                    bound.binding
+                );
+                continue;
+            };
+            if !matches!(entry.ty, wgt::BindingType::Sampler(_)) {
+                log::error!(
+                    "D3D11 binding {} is not a sampler binding in the bind group layout",
+                    bound.binding
+                );
+                continue;
+            }
+            let Some(target) = layout.bind_target(index, bound.binding) else {
+                log::error!(
+                    "D3D11 pipeline layout has no register for group {index} binding {}",
+                    bound.binding
+                );
+                continue;
+            };
+            let slot = next_binding_slot(&mut array_counts, bound.binding, target.register);
+            if slot >= Direct3D11::D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT {
+                log::error!("D3D11 sampler register {slot} is outside the supported range");
+                continue;
+            }
+            let samplers = [Some(bound.sampler.raw().clone())];
+            if entry.visibility.contains(wgt::ShaderStages::VERTEX) {
+                unsafe { self.context.VSSetSamplers(slot, Some(&samplers)) };
+            }
+            if entry.visibility.contains(wgt::ShaderStages::FRAGMENT) {
+                unsafe { self.context.PSSetSamplers(slot, Some(&samplers)) };
+            }
+        }
     }
 
     unsafe fn set_immediates(
@@ -720,50 +1207,220 @@ impl crate::CommandEncoder for CommandBuffer {
         _offset_bytes: u32,
         _data: &[u32],
     ) {
+        // Push constants are not bound yet. Pipeline layouts still reserve a
+        // register for them, so shaders using `set_immediates` will read zeros
+        // until a dedicated immediate constant buffer is implemented.
     }
 
     unsafe fn insert_debug_marker(&mut self, _label: &str) {}
     unsafe fn begin_debug_marker(&mut self, _group_label: &str) {}
     unsafe fn end_debug_marker(&mut self) {}
 
-    unsafe fn set_render_pipeline(&mut self, _pipeline: &Resource) {}
+    unsafe fn set_render_pipeline(&mut self, pipeline: &RenderPipeline) {
+        if let Some(render_pass) = &self.render_pass {
+            if pipeline.sample_count() != render_pass.sample_count {
+                log::error!(
+                    "D3D11 render pipeline sample count {} does not match the render pass sample count {}",
+                    pipeline.sample_count(),
+                    render_pass.sample_count
+                );
+            }
+            if pipeline.color_formats() != render_pass.color_formats.as_slice() {
+                log::error!("D3D11 render pipeline color formats do not match the render pass");
+            }
+            if pipeline.depth_format() != render_pass.depth_format {
+                log::error!("D3D11 render pipeline depth format does not match the render pass");
+            }
+        }
+
+        self.current_blend_state = Some(pipeline.raw_blend_state().clone());
+        self.current_depth_stencil_state = Some(pipeline.raw_depth_stencil_state().clone());
+        self.sample_mask = pipeline.sample_mask();
+
+        unsafe {
+            self.context.VSSetShader(pipeline.raw_vertex_shader(), None);
+            self.context.PSSetShader(pipeline.raw_pixel_shader(), None);
+            self.context.IASetInputLayout(pipeline.raw_input_layout());
+            self.context.IASetPrimitiveTopology(pipeline.topology());
+            self.context.RSSetState(pipeline.raw_rasterizer_state());
+            self.context
+                .OMSetDepthStencilState(pipeline.raw_depth_stencil_state(), self.stencil_reference);
+            self.context.OMSetBlendState(
+                self.current_blend_state.as_ref(),
+                Some(&self.blend_constants),
+                self.sample_mask,
+            );
+        }
+
+        self.current_pipeline = Some(PipelineState {
+            vertex_strides: pipeline.vertex_strides().to_vec(),
+        });
+    }
 
     unsafe fn set_index_buffer<'a>(
         &mut self,
-        _binding: crate::BufferBinding<'a, Buffer>,
-        _format: wgt::IndexFormat,
+        binding: crate::BufferBinding<'a, Buffer>,
+        format: wgt::IndexFormat,
     ) {
+        if !binding.buffer.usage().contains(wgt::BufferUses::INDEX) {
+            log::error!("D3D11 index buffer was not created with INDEX usage");
+            return;
+        }
+        let Ok(offset) = u32::try_from(binding.offset) else {
+            log::error!("D3D11 index buffer offset does not fit in u32");
+            return;
+        };
+        let format = super::conv::map_index_format(format);
+        unsafe {
+            self.context
+                .IASetIndexBuffer(binding.buffer.raw(), format, offset)
+        };
     }
 
     unsafe fn set_vertex_buffer<'a>(
         &mut self,
-        _index: u32,
-        _binding: crate::BufferBinding<'a, Buffer>,
+        index: u32,
+        binding: crate::BufferBinding<'a, Buffer>,
     ) {
+        if index >= Direct3D11::D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT {
+            log::error!("D3D11 vertex buffer slot {index} is outside the supported range");
+            return;
+        }
+        if !binding.buffer.usage().contains(wgt::BufferUses::VERTEX) {
+            log::error!("D3D11 vertex buffer was not created with VERTEX usage");
+            return;
+        }
+        let Some(pipeline) = self.current_pipeline.as_ref() else {
+            log::error!("D3D11 set_vertex_buffer called before set_render_pipeline");
+            return;
+        };
+        let Some(Some(stride)) = pipeline.vertex_strides.get(index as usize) else {
+            log::error!("D3D11 render pipeline does not declare vertex buffer slot {index}");
+            return;
+        };
+        let Ok(offset) = u32::try_from(binding.offset) else {
+            log::error!("D3D11 vertex buffer offset does not fit in u32");
+            return;
+        };
+
+        let buffers = [Some(binding.buffer.raw().clone())];
+        let strides = [*stride];
+        let offsets = [offset];
+        unsafe {
+            self.context.IASetVertexBuffers(
+                index,
+                1,
+                Some(buffers.as_ptr()),
+                Some(strides.as_ptr()),
+                Some(offsets.as_ptr()),
+            )
+        };
     }
 
-    unsafe fn set_viewport(&mut self, _rect: &crate::Rect<f32>, _depth_range: Range<f32>) {}
-    unsafe fn set_scissor_rect(&mut self, _rect: &crate::Rect<u32>) {}
-    unsafe fn set_stencil_reference(&mut self, _value: u32) {}
-    unsafe fn set_blend_constants(&mut self, _color: &[f32; 4]) {}
+    unsafe fn set_viewport(&mut self, rect: &crate::Rect<f32>, depth_range: Range<f32>) {
+        if !(rect.w > 0.0) || !(rect.h > 0.0) {
+            log::error!("D3D11 viewport width and height must be positive");
+            return;
+        }
+        if !(0.0..=1.0).contains(&depth_range.start)
+            || !(0.0..=1.0).contains(&depth_range.end)
+            || depth_range.start > depth_range.end
+        {
+            log::error!("D3D11 viewport depth range must be within 0..=1");
+            return;
+        }
+        let viewport = Direct3D11::D3D11_VIEWPORT {
+            TopLeftX: rect.x,
+            TopLeftY: rect.y,
+            Width: rect.w,
+            Height: rect.h,
+            MinDepth: depth_range.start,
+            MaxDepth: depth_range.end,
+        };
+        unsafe { self.context.RSSetViewports(Some(&[viewport])) };
+    }
+
+    unsafe fn set_scissor_rect(&mut self, rect: &crate::Rect<u32>) {
+        let right = rect.x.saturating_add(rect.w);
+        let bottom = rect.y.saturating_add(rect.h);
+        let scissor = Foundation::RECT {
+            left: i32::try_from(rect.x).unwrap_or(i32::MAX),
+            top: i32::try_from(rect.y).unwrap_or(i32::MAX),
+            right: i32::try_from(right).unwrap_or(i32::MAX),
+            bottom: i32::try_from(bottom).unwrap_or(i32::MAX),
+        };
+        unsafe { self.context.RSSetScissorRects(Some(&[scissor])) };
+    }
+
+    unsafe fn set_stencil_reference(&mut self, value: u32) {
+        self.stencil_reference = value;
+        if let Some(state) = self.current_depth_stencil_state.as_ref() {
+            unsafe { self.context.OMSetDepthStencilState(state, value) };
+        }
+    }
+
+    unsafe fn set_blend_constants(&mut self, color: &[f32; 4]) {
+        self.blend_constants = *color;
+        if let Some(state) = self.current_blend_state.as_ref() {
+            unsafe {
+                self.context
+                    .OMSetBlendState(state, Some(&self.blend_constants), self.sample_mask)
+            };
+        }
+    }
 
     unsafe fn draw(
         &mut self,
-        _first_vertex: u32,
-        _vertex_count: u32,
-        _first_instance: u32,
-        _instance_count: u32,
+        first_vertex: u32,
+        vertex_count: u32,
+        first_instance: u32,
+        instance_count: u32,
     ) {
+        if self.render_pass.is_none() {
+            log::error!("D3D11 draw called outside a render pass");
+            return;
+        }
+        if self.current_pipeline.is_none() {
+            log::error!("D3D11 draw called before set_render_pipeline");
+            return;
+        }
+        if vertex_count == 0 || instance_count == 0 {
+            return;
+        }
+        unsafe {
+            self.context
+                .DrawInstanced(vertex_count, instance_count, first_vertex, first_instance)
+        };
     }
 
     unsafe fn draw_indexed(
         &mut self,
-        _first_index: u32,
-        _index_count: u32,
-        _base_vertex: i32,
-        _first_instance: u32,
-        _instance_count: u32,
+        first_index: u32,
+        index_count: u32,
+        base_vertex: i32,
+        first_instance: u32,
+        instance_count: u32,
     ) {
+        if self.render_pass.is_none() {
+            log::error!("D3D11 indexed draw called outside a render pass");
+            return;
+        }
+        if self.current_pipeline.is_none() {
+            log::error!("D3D11 indexed draw called before set_render_pipeline");
+            return;
+        }
+        if index_count == 0 || instance_count == 0 {
+            return;
+        }
+        unsafe {
+            self.context.DrawIndexedInstanced(
+                index_count,
+                instance_count,
+                first_index,
+                base_vertex,
+                first_instance,
+            )
+        };
     }
 
     unsafe fn draw_mesh_tasks(
@@ -772,22 +1429,99 @@ impl crate::CommandEncoder for CommandBuffer {
         _group_count_y: u32,
         _group_count_z: u32,
     ) {
+        log::error!("D3D11 mesh shader draws are not implemented");
     }
 
     unsafe fn draw_indirect(
         &mut self,
-        _buffer: &Buffer,
-        _offset: wgt::BufferAddress,
-        _draw_count: u32,
+        buffer: &Buffer,
+        offset: wgt::BufferAddress,
+        draw_count: u32,
     ) {
+        if self.render_pass.is_none() || self.current_pipeline.is_none() {
+            log::error!("D3D11 draw_indirect called without a render pass and pipeline");
+            return;
+        }
+        if !buffer.usage().contains(wgt::BufferUses::INDIRECT) {
+            log::error!("D3D11 indirect draw buffer was not created with INDIRECT usage");
+            return;
+        }
+        if offset % 4 != 0 {
+            log::error!("D3D11 indirect draw offset must be 4-byte aligned");
+            return;
+        }
+        let Some(total) = u64::from(draw_count).checked_mul(16) else {
+            log::error!("D3D11 indirect draw argument size overflowed");
+            return;
+        };
+        if offset
+            .checked_add(total)
+            .is_none_or(|end| end > buffer.size())
+        {
+            log::error!("D3D11 indirect draw arguments are outside the buffer");
+            return;
+        }
+        let Ok(offset) = u32::try_from(offset) else {
+            log::error!("D3D11 indirect draw offset does not fit in u32");
+            return;
+        };
+
+        for draw in 0..draw_count {
+            let Some(draw_offset) = offset.checked_add(draw * 16) else {
+                log::error!("D3D11 indirect draw offset overflowed");
+                return;
+            };
+            unsafe {
+                self.context
+                    .DrawInstancedIndirect(buffer.raw(), draw_offset)
+            };
+        }
     }
 
     unsafe fn draw_indexed_indirect(
         &mut self,
-        _buffer: &Buffer,
-        _offset: wgt::BufferAddress,
-        _draw_count: u32,
+        buffer: &Buffer,
+        offset: wgt::BufferAddress,
+        draw_count: u32,
     ) {
+        if self.render_pass.is_none() || self.current_pipeline.is_none() {
+            log::error!("D3D11 draw_indexed_indirect called without a render pass and pipeline");
+            return;
+        }
+        if !buffer.usage().contains(wgt::BufferUses::INDIRECT) {
+            log::error!("D3D11 indirect draw buffer was not created with INDIRECT usage");
+            return;
+        }
+        if offset % 4 != 0 {
+            log::error!("D3D11 indirect draw offset must be 4-byte aligned");
+            return;
+        }
+        let Some(total) = u64::from(draw_count).checked_mul(20) else {
+            log::error!("D3D11 indexed indirect draw argument size overflowed");
+            return;
+        };
+        if offset
+            .checked_add(total)
+            .is_none_or(|end| end > buffer.size())
+        {
+            log::error!("D3D11 indexed indirect draw arguments are outside the buffer");
+            return;
+        }
+        let Ok(offset) = u32::try_from(offset) else {
+            log::error!("D3D11 indexed indirect draw offset does not fit in u32");
+            return;
+        };
+
+        for draw in 0..draw_count {
+            let Some(draw_offset) = offset.checked_add(draw * 20) else {
+                log::error!("D3D11 indexed indirect draw offset overflowed");
+                return;
+            };
+            unsafe {
+                self.context
+                    .DrawIndexedInstancedIndirect(buffer.raw(), draw_offset)
+            };
+        }
     }
 
     unsafe fn draw_mesh_tasks_indirect(
@@ -796,6 +1530,7 @@ impl crate::CommandEncoder for CommandBuffer {
         _offset: wgt::BufferAddress,
         _draw_count: u32,
     ) {
+        log::error!("D3D11 mesh shader indirect draws are not implemented");
     }
 
     unsafe fn draw_indirect_count(
@@ -806,6 +1541,7 @@ impl crate::CommandEncoder for CommandBuffer {
         _count_offset: wgt::BufferAddress,
         _max_count: u32,
     ) {
+        log::error!("D3D11 draw_indirect_count is not implemented");
     }
 
     unsafe fn draw_indexed_indirect_count(
@@ -816,6 +1552,7 @@ impl crate::CommandEncoder for CommandBuffer {
         _count_offset: wgt::BufferAddress,
         _max_count: u32,
     ) {
+        log::error!("D3D11 draw_indexed_indirect_count is not implemented");
     }
 
     unsafe fn draw_mesh_tasks_indirect_count(
@@ -826,6 +1563,7 @@ impl crate::CommandEncoder for CommandBuffer {
         _count_offset: wgt::BufferAddress,
         _max_count: u32,
     ) {
+        log::error!("D3D11 mesh shader indirect count draws are not implemented");
     }
 
     // compute
