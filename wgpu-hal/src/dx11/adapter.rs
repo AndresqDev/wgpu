@@ -202,6 +202,7 @@ impl crate::Adapter for Adapter {
 
         let device = Device::new(
             raw_device.clone(),
+            context.clone(),
             self.info.clone(),
             feature_level,
             self.capabilities.limits.clone(),
@@ -264,7 +265,25 @@ impl crate::Adapter for Adapter {
         &self,
         _surface: &super::Surface,
     ) -> Option<crate::SurfaceCapabilities> {
-        None
+        let formats: Vec<wgt::SurfaceFormatCapabilities> = [
+            wgt::TextureFormat::Bgra8UnormSrgb,
+            wgt::TextureFormat::Bgra8Unorm,
+        ]
+        .into_iter()
+        .map(|format| wgt::SurfaceFormatCapabilities {
+            format,
+            color_spaces: wgt::SurfaceColorSpaces::SRGB,
+        })
+        .collect();
+
+        Some(crate::SurfaceCapabilities {
+            formats,
+            maximum_frame_latency: 1..=2,
+            current_extent: None,
+            usage: wgt::TextureUses::COLOR_TARGET,
+            present_modes: alloc::vec![wgt::PresentMode::Fifo, wgt::PresentMode::Immediate,],
+            composite_alpha_modes: alloc::vec![wgt::CompositeAlphaMode::Opaque],
+        })
     }
 
     unsafe fn get_presentation_timestamp(&self) -> wgt::PresentationTimestamp {

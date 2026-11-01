@@ -1,7 +1,7 @@
-//! D3D11 queue stub.
+//! D3D11 queue.
 //!
 //! D3D11 has no command queue object. Commands are recorded into an
-//! `ID3D11DeviceContext` and submitted when the context is flushed. This stub
+//! `ID3D11DeviceContext` and submitted when the context is flushed. The queue
 //! owns the immediate context and signals fences on the CPU after submission;
 //! real GPU-completion tracking will use an `ID3D11Query` event.
 
@@ -9,7 +9,7 @@ use core::{fmt, sync::atomic::Ordering};
 
 use windows::Win32::Graphics::Direct3D11;
 
-use super::{Api, CommandBuffer, Fence, Resource};
+use super::{Api, CommandBuffer, Fence, SurfaceTexture};
 
 /// The D3D11 submission queue.
 pub struct Queue {
@@ -53,13 +53,13 @@ impl crate::Queue for Queue {
     unsafe fn submit(
         &self,
         command_buffers: &[&CommandBuffer],
-        _surface_textures: &[&Resource],
+        surface_textures: &[&SurfaceTexture],
         (fence, fence_value): (&Fence, crate::FenceValue),
     ) -> Result<(), crate::DeviceError> {
-        // Command recording is a no-op in this skeleton. Once deferred
-        // contexts are implemented, each command buffer will execute its
-        // context here before the flush.
-        let _ = command_buffers;
+        // Render-pass clears are executed immediately on the shared immediate
+        // context, so submission only has to flush the context. Deferred
+        // contexts and ordered command-list execution are the next milestone.
+        let _ = (command_buffers, surface_textures);
 
         unsafe { self.context.Flush() };
         self.last_submitted.fetch_max(fence_value, Ordering::AcqRel);
@@ -69,12 +69,10 @@ impl crate::Queue for Queue {
 
     unsafe fn present(
         &self,
-        _surface: &super::Surface,
-        _texture: Resource,
+        surface: &super::Surface,
+        texture: SurfaceTexture,
     ) -> Result<(), crate::SurfaceError> {
-        Err(crate::SurfaceError::Other(
-            "D3D11 presentation is not implemented yet",
-        ))
+        surface.present_texture(&texture)
     }
 
     unsafe fn wait_for_idle(&self) -> Result<(), crate::DeviceError> {

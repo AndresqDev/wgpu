@@ -1,19 +1,23 @@
-//! DXGI instance creation and adapter enumeration.
+//! DXGI instance creation, adapter enumeration, and surface creation.
 
 use alloc::{string::String, vec::Vec};
 use core::fmt;
 
-use windows::Win32::Graphics::Dxgi;
+use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
+use windows::Win32::{Foundation, Graphics::Dxgi};
 
 use super::Adapter;
 
 /// D3D11 instance backed by a DXGI factory.
 ///
-/// `IDXGIFactory1` is enough for `EnumAdapters1`, which is all the skeleton
-/// needs. The final backend will keep an `IDXGIFactory2` (or newer) as well for
-/// swap-chain creation.
+/// The factory is requested as `IDXGIFactory2` because windowed presentation
+/// needs `CreateSwapChainForHwnd`, which does not exist on `IDXGIFactory1`.
+/// `CreateDXGIFactory1::<IDXGIFactory2>()` has been supported since Windows 8,
+/// which is also the minimum version that supports the flip-model swap chains
+/// used by [`super::Surface`]. No `IDXGIFactory1` fallback is needed: on older
+/// systems the factory creation fails with a clear `E_NOINTERFACE` error.
 pub struct Instance {
-    factory: Dxgi::IDXGIFactory1,
+    factory: Dxgi::IDXGIFactory2,
     flags: wgt::InstanceFlags,
 }
 
@@ -31,12 +35,9 @@ impl crate::Instance for Instance {
     unsafe fn init(desc: &crate::InstanceDescriptor<'_>) -> Result<Self, crate::InstanceError> {
         profiling::scope!("Init DX11 Backend");
 
-        // `CreateDXGIFactory1` is available on every Windows version that has
-        // D3D11. Asking for `IDXGIFactory2` as well would only add swap-chain
-        // features that this skeleton does not use yet.
         let factory =
-            unsafe { Dxgi::CreateDXGIFactory1::<Dxgi::IDXGIFactory1>() }.map_err(|e| {
-                crate::InstanceError::new(format!("failed to create IDXGIFactory1: {e}"))
+            unsafe { Dxgi::CreateDXGIFactory1::<Dxgi::IDXGIFactory2>() }.map_err(|e| {
+                crate::InstanceError::new(format!("failed to create IDXGIFactory2: {e}"))
             })?;
 
         Ok(Self {
@@ -47,12 +48,25 @@ impl crate::Instance for Instance {
 
     unsafe fn create_surface(
         &self,
-        _display_handle: raw_window_handle::RawDisplayHandle,
-        _window_handle: raw_window_handle::RawWindowHandle,
+        _display_handle: RawDisplayHandle,
+        window_handle: RawWindowHandle,
     ) -> Result<super::Surface, crate::InstanceError> {
-        Err(crate::InstanceError::new(String::from(
-            "D3D11 surface creation is not implemented yet",
-        )))
+        // DXGI only needs the window handle for `CreateSwapChainForHwnd`.
+        // The display handle carries no additional information that D3D11
+        // surface creation can use, so any Win32 (or empty) display handle is
+        // accepted here.
+        let hwnd = match window_handle {
+            RawWindowHandle::Win32(handle) => {
+                Foundation::HWND(handle.hwnd.get() as *mut core::ffi::c_void)
+            }
+            _ => {
+                return Err(crate::InstanceError::new(String::from(
+                    "the D3D11 backend only supports Win32 windows",
+                )));
+            }
+        };
+
+        Ok(super::Surface::new(self.factory.clone(), hwnd))
     }
 
     unsafe fn enumerate_adapters(
@@ -82,8 +96,8 @@ impl crate::Instance for Instance {
 }
 
 impl Instance {
-    /// Returns the DXGI factory used to enumerate adapters.
-    pub fn raw_factory(&self) -> &Dxgi::IDXGIFactory1 {
+    /// Returns the DXGI factory used to enumerate adapters and create surfaces.
+    pub fn raw_factory(&self) -> &Dxgi::IDXGIFactory2 {
         &self.factory
     }
 }

@@ -136,8 +136,9 @@ gles = [
 ]
 ## Enables the experimental DX11 backend when targeting Windows.
 ##
-## Currently this only provides DXGI adapter enumeration and `D3D11CreateDevice`
-## based device creation. Rendering, shaders and presentation are stubs.
+## Currently this provides DXGI adapter enumeration, `D3D11CreateDevice` based
+## device creation, a windowed flip-model swap chain, clear-only render passes
+## and presentation. Buffers, generic textures and shaders are stubs.
 dx11 = [
     "dep:arrayvec",
     "dep:bytemuck",
@@ -145,7 +146,9 @@ dx11 = [
     "dep:parking_lot",
     "dep:profiling",
     "dep:windows",
+    "dep:windows-result",
     "naga/hlsl-out",
+    "windows-result/std", # Needed so `windows::core::Error` implements `std::error::Error` in the example.
     "windows/Win32_Foundation",
     "windows/Win32_Graphics_Direct3D",
     "windows/Win32_Graphics_Direct3D11",
@@ -224,6 +227,10 @@ required-features = ["gles"]
 
 [[example]]
 name = "raw-dx11"
+required-features = ["dx11"]
+
+[[example]]
+name = "raw-dx11-window"
 required-features = ["dx11"]
 
 #####################

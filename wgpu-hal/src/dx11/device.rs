@@ -15,6 +15,7 @@ use super::{Api, CommandBuffer, Fence, PipelineCache, Resource, ShaderModule};
 /// An open D3D11 device.
 pub struct Device {
     raw_device: Direct3D11::ID3D11Device,
+    raw_context: Direct3D11::ID3D11DeviceContext,
     info: wgt::AdapterInfo,
     feature_level: Direct3D::D3D_FEATURE_LEVEL,
     limits: wgt::Limits,
@@ -32,12 +33,14 @@ impl fmt::Debug for Device {
 impl Device {
     pub(crate) fn new(
         raw_device: Direct3D11::ID3D11Device,
+        raw_context: Direct3D11::ID3D11DeviceContext,
         info: wgt::AdapterInfo,
         feature_level: Direct3D::D3D_FEATURE_LEVEL,
         limits: wgt::Limits,
     ) -> Self {
         Self {
             raw_device,
+            raw_context,
             info,
             feature_level,
             limits,
@@ -47,6 +50,11 @@ impl Device {
     /// Returns the underlying D3D11 device.
     pub fn raw_device(&self) -> &Direct3D11::ID3D11Device {
         &self.raw_device
+    }
+
+    /// Returns the immediate context owned by this device.
+    pub fn raw_context(&self) -> &Direct3D11::ID3D11DeviceContext {
+        &self.raw_context
     }
 
     /// Returns the feature level used to create this device.
@@ -118,7 +126,7 @@ impl crate::Device for Device {
         &self,
         _desc: &crate::CommandEncoderDescriptor<super::Queue>,
     ) -> Result<CommandBuffer, crate::DeviceError> {
-        Ok(CommandBuffer::new())
+        Ok(CommandBuffer::new(self.raw_context.clone()))
     }
 
     unsafe fn create_bind_group_layout(
