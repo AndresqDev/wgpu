@@ -322,6 +322,34 @@ impl BindGroupLayout {
             previous = Some(entry.binding);
 
             match entry.ty {
+                // No storage binding may be accepted and then silently dropped.
+                // D3D11 without compute/writable-storage support has no way to
+                // bind storage buffers or storage textures.
+                wgt::BindingType::Buffer {
+                    ty: wgt::BufferBindingType::Storage { .. },
+                    has_dynamic_offset,
+                    ..
+                } => {
+                    if has_dynamic_offset {
+                        log::error!(
+                            "D3D11 does not support dynamic storage buffer offsets (binding {})",
+                            entry.binding
+                        );
+                    } else {
+                        log::error!(
+                            "D3D11 does not support storage buffers (binding {})",
+                            entry.binding
+                        );
+                    }
+                    return Err(crate::DeviceError::Unexpected);
+                }
+                wgt::BindingType::StorageTexture { .. } => {
+                    log::error!(
+                        "D3D11 does not support storage textures (binding {})",
+                        entry.binding
+                    );
+                    return Err(crate::DeviceError::Unexpected);
+                }
                 wgt::BindingType::AccelerationStructure { .. }
                 | wgt::BindingType::ExternalTexture => {
                     log::error!("D3D11 does not support this binding type: {:?}", entry.ty);
@@ -387,9 +415,12 @@ impl PipelineLayout {
             );
             return Err(crate::DeviceError::Unexpected);
         }
-        if immediate_size % 4 != 0 || immediate_size > 65_536 {
+        if immediate_size > 0 {
+            // `max_immediate_size` is advertised as 0, so no accepted pipeline
+            // layout may request immediates; otherwise `set_immediates` would be
+            // reachable through a layout that cannot honour it.
             log::error!(
-                "D3D11 immediate data must be a multiple of 4 bytes and at most 65536 bytes"
+                "D3D11 does not support immediates, but the pipeline layout requests {immediate_size} bytes"
             );
             return Err(crate::DeviceError::Unexpected);
         }
@@ -879,28 +910,82 @@ impl Borrow<dyn crate::DynTexture> for SurfaceTexture {
     }
 }
 
-/// A CPU-visible fence value.
+/// A GPU-completion fence backed by an `ID3D11Query` of type
+/// `D3D11_QUERY_EVENT`.
 ///
-/// The real implementation will pair this with an `ID3D11Query`
-/// (`D3D11_QUERY_EVENT`) so that [`crate::Device::wait`] can block on GPU
-/// completion. For now the value is only updated by [`crate::Queue::submit`],
-/// which is CPU-synchronous in this skeleton.
-#[derive(Debug, Default)]
+/// [`crate::Queue::submit`] arms `query` immediately before flushing the
+/// immediate context and [`crate::Device::wait`] polls it with
+/// `ID3D11DeviceContext::GetData`. Two atomic values track progress:
+///
+/// - `pending_value` is the highest value submitted on this fence;
+/// - `completed_value` is the highest value the GPU has actually reached.
+///
+/// At most one marker is in flight per fence: `submit` retires the previous
+/// marker before arming the next one, so observing a marker proves every value
+/// armed before it is complete. `completed_value` is only advanced to values
+/// whose marker was actually observed, so it can lag behind `pending_value`
+/// but never leads it.
+///
+/// The atomics are safe to read from any thread. `query` itself is a COM
+/// interface without thread affinity; it is only used under the HAL's
+/// external-synchronization contract (a fence's submit and wait calls are not
+/// issued concurrently by the caller). The interface stays valid for as long
+/// as this `Fence` is alive.
 pub struct Fence {
-    value: crate::AtomicFenceValue,
+    /// `D3D11_QUERY_EVENT` armed by [`crate::Queue::submit`]; dropped with the
+    /// fence, which releases the D3D11 query object.
+    query: Direct3D11::ID3D11Query,
+    pending_value: crate::AtomicFenceValue,
+    completed_value: crate::AtomicFenceValue,
 }
 
 impl Fence {
-    pub(crate) fn new() -> Self {
-        Self::default()
+    pub(crate) fn new(query: Direct3D11::ID3D11Query) -> Self {
+        Self {
+            query,
+            pending_value: Default::default(),
+            completed_value: Default::default(),
+        }
     }
 
-    pub(crate) fn signal(&self, value: u64) {
-        self.value.fetch_max(value, Ordering::Release);
+    /// Returns the query that marks GPU completion of this fence.
+    pub(crate) fn query(&self) -> &Direct3D11::ID3D11Query {
+        &self.query
     }
 
-    pub(crate) fn value(&self) -> u64 {
-        self.value.load(Ordering::Acquire)
+    /// Highest fence value submitted on this fence.
+    pub(crate) fn pending(&self) -> u64 {
+        self.pending_value.load(Ordering::Acquire)
+    }
+
+    /// Highest fence value the GPU has been observed to complete.
+    pub(crate) fn completed(&self) -> u64 {
+        self.completed_value.load(Ordering::Acquire)
+    }
+
+    /// Records that `value` has been submitted and is covered by the marker
+    /// armed for it.
+    pub(crate) fn note_pending(&self, value: u64) {
+        self.pending_value.fetch_max(value, Ordering::AcqRel);
+    }
+
+    /// Records that the GPU has completed the marker armed for `value`.
+    ///
+    /// Only the value the caller actually observed is published: a value
+    /// submitted after that marker was armed stays pending until its own
+    /// marker is observed. `completed_value` can therefore lag behind
+    /// `pending_value`, but it never leads it.
+    pub(crate) fn note_completed(&self, value: u64) {
+        self.completed_value.fetch_max(value, Ordering::Release);
+    }
+}
+
+impl core::fmt::Debug for Fence {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Fence")
+            .field("pending", &self.pending())
+            .field("completed", &self.completed())
+            .finish_non_exhaustive()
     }
 }
 
@@ -910,3 +995,14 @@ impl Fence {
 /// eventually be cached by `wgpu-core` or on disk.
 #[derive(Debug, Default)]
 pub struct PipelineCache;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pipeline_layout_rejects_immediates_and_accepts_none() {
+        assert!(PipelineLayout::new(Vec::new(), 0).is_ok());
+        assert!(PipelineLayout::new(Vec::new(), 4).is_err());
+    }
+}

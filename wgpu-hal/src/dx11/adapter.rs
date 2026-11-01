@@ -249,7 +249,9 @@ impl crate::Adapter for Adapter {
             caps |= Tfc::SAMPLED_LINEAR;
         }
         if supports(Direct3D11::D3D11_FORMAT_SUPPORT_RENDER_TARGET) {
-            caps |= Tfc::COLOR_ATTACHMENT | Tfc::MULTISAMPLE_X4;
+            // Multisampled rendering is not supported by this backend yet, so no
+            // `MULTISAMPLE_*` capability is ever advertised.
+            caps |= Tfc::COLOR_ATTACHMENT;
         }
         if supports(Direct3D11::D3D11_FORMAT_SUPPORT_BLENDABLE) {
             caps |= Tfc::COLOR_ATTACHMENT_BLEND;
@@ -278,6 +280,9 @@ impl crate::Adapter for Adapter {
 
         Some(crate::SurfaceCapabilities {
             formats,
+            // Advertised for API completeness only: `configure` ignores the
+            // requested latency, so this value is not enforced. Documented
+            // limitation, not a verified capability.
             maximum_frame_latency: 1..=2,
             current_extent: None,
             usage: wgt::TextureUses::COLOR_TARGET,

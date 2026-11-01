@@ -18,7 +18,10 @@ provides compilable stubs for the rest of the `wgpu-hal` API.
   context.
 - [`Surface::configure`](crate::Surface::configure) creates a
   `DXGI_SWAP_EFFECT_FLIP_DISCARD` swap chain with two BGRA8 back buffers and a
-  render-target view for each buffer.
+  render-target view for each buffer. Reconfiguring (for example on a window
+  resize) releases the previous swap chain and its views before creating the
+  replacement chain; the `raw-dx11-resize` example verifies that the acquired
+  back-buffer extent follows the requested configuration.
 - [`CommandBuffer::begin_render_pass`](crate::CommandEncoder::begin_render_pass)
   binds real render-target and depth-stencil views with `OMSetRenderTargets` and
   applies the requested clears. Render pipelines and draw commands are executed
@@ -49,6 +52,21 @@ provides compilable stubs for the rest of the `wgpu-hal` API.
   `ID3D11DeviceContext1` and must describe 256-byte-aligned constant-buffer
   windows; otherwise the binding is rejected with an explicit error log.
   Vertex input layouts use Naga's `LOC<location>` semantics.
+- [`Queue::wait_for_idle`](crate::Queue::wait_for_idle) performs a real
+  GPU-completion wait: the queue owns an `ID3D11Query` of type
+  `D3D11_QUERY_EVENT`, `wait_for_idle` ends it and flushes before polling
+  `ID3D11DeviceContext::GetData` on that marker with a bounded five-second
+  timeout.
+- [`Device::wait`](crate::Device::wait) waits for real GPU completion. Each
+  [`Fence`] owns its own `D3D11_QUERY_EVENT`: `submit` retires the previous
+  marker, arms the fence query before flushing and records the value as
+  pending; `wait` polls the marker and only then advances the completed value.
+  [`Device::get_fence_value`](crate::Device::get_fence_value) reports the
+  highest GPU-completed value, not the highest submitted one. Device removal is
+  reported as `DeviceError::Lost` / `SurfaceError::Lost` from submit, present
+  and the wait paths.
+- `maximum_frame_latency` is accepted by `Surface::configure` but not enforced;
+  DXGI uses its own frame-latency queue for flip-model swap chains.
 
 ## Next steps
 
