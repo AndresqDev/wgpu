@@ -107,6 +107,7 @@ fn create_staging_texture(
     format: Dxgi::Common::DXGI_FORMAT,
     width: u32,
     height: u32,
+    cpu_access_flags: u32,
 ) -> windows::core::Result<Direct3D11::ID3D11Texture2D> {
     let desc = Direct3D11::D3D11_TEXTURE2D_DESC {
         Width: width,
@@ -120,7 +121,7 @@ fn create_staging_texture(
         },
         Usage: Direct3D11::D3D11_USAGE_STAGING,
         BindFlags: 0,
-        CPUAccessFlags: Direct3D11::D3D11_CPU_ACCESS_READ.0 as u32,
+        CPUAccessFlags: cpu_access_flags,
         MiscFlags: 0,
     };
 
@@ -555,39 +556,84 @@ impl crate::CommandEncoder for CommandBuffer {
                 )
             };
 
-            let mut mapped = Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
+            let dxgi_format = match super::conv::map_texture_format(format) {
+                Some(format) => format,
+                None => {
+                    log::error!("texture format is not supported for D3D11 upload");
+                    continue;
+                }
+            };
+
+            // `UpdateSubresource` cannot target depth-stencil resources, so
+            // stage the rows in a writable staging texture and copy from there.
+            let staging_texture = match create_staging_texture(
+                &self.device,
+                dxgi_format,
+                copy.size.width,
+                copy.size.height,
+                Direct3D11::D3D11_CPU_ACCESS_WRITE.0 as u32,
+            ) {
+                Ok(texture) => texture,
+                Err(e) => {
+                    log::error!("failed to create a staging texture for texture upload: {e}");
+                    continue;
+                }
+            };
+
+            let mut mapped_src = Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
             if let Err(e) = unsafe {
                 self.context.Map(
                     &staging,
                     0,
                     Direct3D11::D3D11_MAP_READ,
                     0,
-                    Some(&mut mapped),
+                    Some(&mut mapped_src),
                 )
             } {
                 log::error!("failed to map the staging buffer for texture upload: {e}");
                 continue;
             }
 
-            let Some(dst_box) = make_box(&copy.texture_base.origin, &copy.size) else {
+            let mut mapped_dst = Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
+            if let Err(e) = unsafe {
+                self.context.Map(
+                    &staging_texture,
+                    0,
+                    Direct3D11::D3D11_MAP_WRITE,
+                    0,
+                    Some(&mut mapped_dst),
+                )
+            } {
                 unsafe { self.context.Unmap(&staging, 0) };
-                log::error!("buffer-to-texture destination box overflowed");
+                log::error!("failed to map the staging texture for texture upload: {e}");
                 continue;
-            };
+            }
+
+            for row in 0..rows as usize {
+                let src_row =
+                    unsafe { (mapped_src.pData as *const u8).add(row * pitch as usize) };
+                let dst_row = unsafe {
+                    (mapped_dst.pData as *mut u8).add(row * mapped_dst.RowPitch as usize)
+                };
+                unsafe { ptr::copy_nonoverlapping(src_row, dst_row, row_bytes as usize) };
+            }
 
             unsafe {
-                self.context.UpdateSubresource(
+                self.context.Unmap(&staging_texture, 0);
+                self.context.Unmap(&staging, 0);
+                self.context.CopySubresourceRegion(
                     dst.raw(),
                     dst.subresource_index(
                         copy.texture_base.mip_level,
                         copy.texture_base.array_layer,
                     ),
-                    Some(&dst_box),
-                    mapped.pData as *const c_void,
-                    pitch,
-                    pitch * rows,
+                    copy.texture_base.origin.x,
+                    copy.texture_base.origin.y,
+                    0,
+                    &staging_texture,
+                    0,
+                    None,
                 );
-                self.context.Unmap(&staging, 0);
             }
         }
     }
@@ -663,6 +709,7 @@ impl crate::CommandEncoder for CommandBuffer {
                 dxgi_format,
                 copy.size.width,
                 copy.size.height,
+                Direct3D11::D3D11_CPU_ACCESS_READ.0 as u32,
             ) {
                 Ok(texture) => texture,
                 Err(e) => {
