@@ -370,7 +370,7 @@ pub fn limits_for_feature_level(level: Direct3D::D3D_FEATURE_LEVEL) -> wgt::Limi
     wgt::Limits {
         max_texture_dimension_1d: 0,
         max_texture_dimension_2d,
-        max_texture_dimension_3d: 0,
+        max_texture_dimension_3d: 1,
         max_texture_array_layers: 2048,
         max_bind_groups: 4,
         max_bind_groups_plus_vertex_buffers: 24,

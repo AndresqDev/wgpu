@@ -9,6 +9,7 @@ on:
   push:
     branches:
       - dx11-hal-pipelines
+      - dx11-d3-lut
 
 permissions:
   contents: read

@@ -555,7 +555,7 @@ fn check_limits(
 
     check_limit!(max_texture_dimension_1d, 0);
     check_limit!(max_texture_dimension_2d, max_texture_dimension_2d);
-    check_limit!(max_texture_dimension_3d, 0);
+    check_limit!(max_texture_dimension_3d, 1);
     check_limit!(max_texture_array_layers, 2048);
     check_limit!(max_bind_groups, 4);
     check_limit!(max_bind_groups_plus_vertex_buffers, 24);
@@ -1262,7 +1262,8 @@ fn negative_tests(
     };
     expect_err(failures, &description, call);
 
-    // 5. 1D and 3D textures are not implemented.
+    // 5. 1D textures are not implemented; only the 1x1x1 sampled volume
+    // placeholder used by Bevy's tonemapping pipeline is supported.
     let description = format!("{label}: create_texture(TextureDimension::D1)");
     let call = || unsafe {
         let result = device.create_texture(&texture_desc(
@@ -1277,19 +1278,43 @@ fn negative_tests(
     };
     expect_err(failures, &description, call);
 
-    let description = format!("{label}: create_texture(TextureDimension::D3)");
-    let call = || unsafe {
-        let result = device.create_texture(&texture_desc(
-            "contract 3D texture",
+    let maybe_volume = unsafe {
+        device.create_texture(&texture_desc(
+            "contract 3D LUT placeholder",
             wgt::TextureFormat::Rgba8Unorm,
             wgt::TextureDimension::D3,
-            extent(4, 4, 1),
+            extent(1, 1, 1),
             1,
-            wgt::TextureUses::RESOURCE,
-        ));
-        result.map(|_| ())
+            wgt::TextureUses::RESOURCE | wgt::TextureUses::COPY_DST,
+        ))
     };
-    expect_err(failures, &description, call);
+    match maybe_volume {
+        Ok(volume) => {
+            let maybe_view = unsafe {
+                device.create_texture_view(
+                    &volume,
+                    &wgpu_hal::TextureViewDescriptor {
+                        label: Some("contract 3D LUT view"),
+                        format: wgt::TextureFormat::Rgba8Unorm,
+                        dimension: wgt::TextureViewDimension::D3,
+                        usage: wgt::TextureUses::RESOURCE,
+                        range: full_view_range(),
+                    },
+                )
+            };
+            if let Err(error) = maybe_view {
+                failures.push(format!(
+                    "{label}: create_texture_view(TextureDimension::D3) failed: {error:?}"
+                ));
+            } else if let Ok(view) = maybe_view {
+                unsafe { device.destroy_texture_view(view) };
+            }
+            unsafe { device.destroy_texture(volume) };
+        }
+        Err(error) => failures.push(format!(
+            "{label}: create_texture(TextureDimension::D3 1x1x1) failed: {error:?}"
+        )),
+    }
 
     // 6. Arbitrary view formats are rejected.
     view_format_must_fail(label, device, failures);
