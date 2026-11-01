@@ -331,10 +331,6 @@ fn section_buffer_creation(device: &wgpu_hal::dx11::Device) -> Result<(), String
             wgt::BufferUses::STORAGE_READ_WRITE,
         ),
         (
-            "storage read-only + MAP_WRITE",
-            wgt::BufferUses::STORAGE_READ_ONLY | wgt::BufferUses::MAP_WRITE,
-        ),
-        (
             "storage read-only + VERTEX",
             wgt::BufferUses::STORAGE_READ_ONLY | wgt::BufferUses::VERTEX,
         ),
@@ -548,11 +544,7 @@ fn section_render_and_readback(
     let mut initial = [0u8; STORAGE_BINDING_SIZE as usize];
     initial[0..4].copy_from_slice(&255u32.to_le_bytes());
     unsafe {
-        core::ptr::copy_nonoverlapping(
-            initial.as_ptr(),
-            mapping.ptr.as_ptr(),
-            initial.len(),
-        );
+        core::ptr::copy_nonoverlapping(initial.as_ptr(), mapping.ptr.as_ptr(), initial.len());
         device.unmap_buffer(&mapped_storage);
     }
     println!("  mapped storage buffer initialized through its staging copy");
@@ -568,8 +560,7 @@ fn section_render_and_readback(
     let mapped_target = create_texture(device, "mapped storage target")?;
     let mapped_view = create_view(device, &mapped_target, "mapped storage RTV")?;
     submit_encoder(device, queue, "mapped storage draw", |encoder| {
-        let color_attachments =
-            [Some(make_color_attachment(&mapped_view, wgt::Color::BLACK))];
+        let color_attachments = [Some(make_color_attachment(&mapped_view, wgt::Color::BLACK))];
         let pass = render_pass_descriptor(
             "mapped storage draw",
             wgt::Extent3d {

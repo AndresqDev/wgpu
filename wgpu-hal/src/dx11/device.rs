@@ -598,8 +598,8 @@ impl crate::Device for Device {
         // accessible. wgpu-core sets MAP_WRITE for `mapped_at_creation`
         // buffers (and some readback paths), so keep a staging copy and
         // synchronize it with `CopyResource` around map/unmap.
-        let storage_mapped = storage
-            && usage.intersects(wgt::BufferUses::MAP_READ | wgt::BufferUses::MAP_WRITE);
+        let storage_mapped =
+            storage && usage.intersects(wgt::BufferUses::MAP_READ | wgt::BufferUses::MAP_WRITE);
 
         let (map_mode, d3d_usage, cpu_access_flags) = if storage_mapped {
             (BufferMapMode::GpuOnly, Direct3D11::D3D11_USAGE_DEFAULT, 0)
