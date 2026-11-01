@@ -360,7 +360,12 @@ pub fn downlevel_for_feature_level(
     flags.remove(
         wgt::DownlevelFlags::VIEW_FORMATS
             | wgt::DownlevelFlags::SURFACE_VIEW_FORMATS
-            | wgt::DownlevelFlags::NONBLOCKING_QUERY_RESOLVE,
+            | wgt::DownlevelFlags::NONBLOCKING_QUERY_RESOLVE
+            // Compute and writable storage textures are not implemented yet.
+            // Leaving COMPUTE_SHADERS set makes wgpu-core enable its indirect
+            // validation compute pass, which requires dynamic storage offsets.
+            | wgt::DownlevelFlags::COMPUTE_SHADERS
+            | wgt::DownlevelFlags::FRAGMENT_WRITABLE_STORAGE,
     );
 
     if level.0 < (Direct3D::D3D_FEATURE_LEVEL_11_0).0 {
