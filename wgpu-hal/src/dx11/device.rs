@@ -35,16 +35,21 @@ fn unexpected(message: &str) -> crate::DeviceError {
 
 fn map_buffer_bind_flags(usage: wgt::BufferUses) -> u32 {
     let mut bind_flags = 0u32;
+    let storage =
+        usage.intersects(wgt::BufferUses::STORAGE_READ_ONLY | wgt::BufferUses::STORAGE_READ_WRITE);
     if usage.contains(wgt::BufferUses::VERTEX) {
         bind_flags |= Direct3D11::D3D11_BIND_VERTEX_BUFFER.0 as u32;
     }
     if usage.contains(wgt::BufferUses::INDEX) {
         bind_flags |= Direct3D11::D3D11_BIND_INDEX_BUFFER.0 as u32;
     }
-    if usage.contains(wgt::BufferUses::UNIFORM) {
+    // D3D11 constant buffers cannot share a resource with any other bind
+    // flag. Bevy's visibility-range buffer advertises UNIFORM as a fallback
+    // but selects storage on this adapter; expose it as a raw SRV, not a CBV.
+    if usage.contains(wgt::BufferUses::UNIFORM) && !storage {
         bind_flags |= Direct3D11::D3D11_BIND_CONSTANT_BUFFER.0 as u32;
     }
-    if usage.intersects(wgt::BufferUses::STORAGE_READ_ONLY | wgt::BufferUses::STORAGE_READ_WRITE) {
+    if storage {
         // Read-only storage buffers are exposed to shaders as raw SRVs
         // (`ByteAddressBuffer` in the generated HLSL).
         bind_flags |= Direct3D11::D3D11_BIND_SHADER_RESOURCE.0 as u32;
@@ -833,14 +838,6 @@ impl crate::Device for Device {
                     "D3D11 storage buffers support read-only SRV bindings only; read-write/UAV storage is not implemented",
                 ));
             }
-            // A raw buffer SRV is created with the buffer staged as a shader
-            // resource. Mixing it with constant buffers, vertex/index data or
-            // indirect arguments would silently drop one of the bindings.
-            if usage.intersects(wgt::BufferUses::UNIFORM | wgt::BufferUses::INDIRECT) {
-                return Err(unexpected(
-                    "D3D11 storage buffers cannot be combined with UNIFORM or INDIRECT usage",
-                ));
-            }
         }
 
         // D3D11 cannot create a buffer that is both CPU accessible and an
@@ -862,7 +859,7 @@ impl crate::Device for Device {
         // the uncommon mixed case explicitly instead of silently dropping one
         // of the bindings.
         let constant_buffer = Direct3D11::D3D11_BIND_CONSTANT_BUFFER.0 as u32;
-        if bind_flags & constant_buffer != 0 && bind_flags != constant_buffer {
+        if !storage && bind_flags & constant_buffer != 0 && bind_flags != constant_buffer {
             return Err(unexpected(
                 "D3D11 does not support combining UNIFORM with other buffer bind usages yet",
             ));
