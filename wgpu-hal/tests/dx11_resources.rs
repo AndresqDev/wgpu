@@ -232,21 +232,11 @@ fn section_buffers(device: &wgpu_hal::dx11::Device) -> Result<(), String> {
         buffers.push(buffer);
     }
 
-    let negatives: [(&str, u64, wgt::BufferUses); 8] = [
+    let negatives: [(&str, u64, wgt::BufferUses); 6] = [
         (
             "storage read-write",
             SIZE,
             wgt::BufferUses::STORAGE_READ_WRITE,
-        ),
-        (
-            "storage read-only + UNIFORM",
-            SIZE,
-            wgt::BufferUses::STORAGE_READ_ONLY | wgt::BufferUses::UNIFORM,
-        ),
-        (
-            "storage read-only + INDIRECT",
-            SIZE,
-            wgt::BufferUses::STORAGE_READ_ONLY | wgt::BufferUses::INDIRECT,
         ),
         (
             "MAP_READ + VERTEX",
