@@ -1,0 +1,53 @@
+name: DX11 stability check
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - dx11-hal-stability
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  check-windows:
+    name: Windows DX11 stability and device-loss checks
+    runs-on: windows-2025
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check wgpu-hal with the DX11 backend
+        run: cargo check -p wgpu-hal --features dx11
+
+      - name: Run DX11 regression and stability tests
+        run: >-
+          cargo test -p wgpu-hal --features dx11
+          --test dx11_contract
+          --test dx11_resources
+          --test dx11_shaders
+          --test dx11_descriptors
+          --test dx11_pipelines
+          --test dx11_debug
+          --test dx11_device_loss
+          -- --nocapture
+
+      - name: Run window and resize examples
+        run: |
+          cargo run -p wgpu-hal --features dx11 --example raw-dx11-window
+          cargo run -p wgpu-hal --features dx11 --example raw-dx11-resize
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check

@@ -485,19 +485,32 @@ fn check_limits(
 
     println!(
         "  limits: max_texture_dimension_2d = {} (feature level {}); \
-         alignments are out of Gate 0 scope and only listed as follow-up",
+         alignments are part of the stability contract",
         limits.max_texture_dimension_2d, feature_level
     );
+    let alignments = &exposed.capabilities.alignments;
     println!(
-        "  follow-up alignments: buffer_copy_offset={:?} buffer_copy_pitch={:?} \
+        "  alignments: buffer_copy_offset={:?} buffer_copy_pitch={:?} \
          uniform_bounds_check_alignment={:?}",
-        exposed.capabilities.alignments.buffer_copy_offset,
-        exposed.capabilities.alignments.buffer_copy_pitch,
-        exposed
-            .capabilities
-            .alignments
-            .uniform_bounds_check_alignment
+        alignments.buffer_copy_offset,
+        alignments.buffer_copy_pitch,
+        alignments.uniform_bounds_check_alignment
     );
+    for (name, value) in [
+        ("buffer_copy_offset", alignments.buffer_copy_offset),
+        ("buffer_copy_pitch", alignments.buffer_copy_pitch),
+        (
+            "uniform_bounds_check_alignment",
+            alignments.uniform_bounds_check_alignment,
+        ),
+    ] {
+        if value.get() != 16 {
+            failures.push(format!(
+                "{label}: alignment `{name}` is {} but Gate 0 requires 16",
+                value.get()
+            ));
+        }
+    }
 
     check_limit!(max_texture_dimension_1d, 0);
     check_limit!(max_texture_dimension_2d, max_texture_dimension_2d);

@@ -467,13 +467,13 @@ pub fn features_for_feature_level(_level: Direct3D::D3D_FEATURE_LEVEL) -> wgt::F
 /// bytes. Textures are uploaded/read back through staging buffers with a row
 /// pitch the backend repacks itself, but the public layout is still limited to
 /// 4-byte offsets and pitches instead of advertising an alignment the copies
-/// reject. `uniform_bounds_check_alignment` is left at 1: uniform bindings are
+/// reject. D3D11 constant-buffer windows are 16-byte granular.
 /// checked against the 16-byte D3D11 requirement in `set_bind_group`.
 pub fn alignments() -> crate::Alignments {
     crate::Alignments {
-        buffer_copy_offset: wgt::BufferSize::new(4).unwrap(),
-        buffer_copy_pitch: wgt::BufferSize::new(4).unwrap(),
-        uniform_bounds_check_alignment: wgt::BufferSize::MIN,
+        buffer_copy_offset: wgt::BufferSize::new(16).unwrap(),
+        buffer_copy_pitch: wgt::BufferSize::new(16).unwrap(),
+        uniform_bounds_check_alignment: wgt::BufferSize::new(16).unwrap(),
         raw_tlas_instance_size: 0,
         ray_tracing_scratch_buffer_alignment: 1,
         ray_tracing_pipeline_group_data_size: 1,
