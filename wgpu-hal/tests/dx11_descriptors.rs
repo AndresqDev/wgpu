@@ -758,8 +758,18 @@ fn section_negative_limits(
             limits.max_dynamic_uniform_buffers_per_pipeline_layout
         ));
     }
+    // Split the nine dynamic bindings across stages so the per-stage uniform
+    // limit is not the reason for rejection; the pipeline-layout dynamic
+    // limit must reject the ninth binding.
     let dynamic_entries: Vec<_> = (0..9)
-        .map(|binding| uniform_entry(binding, wgt::ShaderStages::VERTEX, true))
+        .map(|binding| {
+            let visibility = if binding % 2 == 0 {
+                wgt::ShaderStages::VERTEX
+            } else {
+                wgt::ShaderStages::FRAGMENT
+            };
+            uniform_entry(binding, visibility, true)
+        })
         .collect();
     let dynamic_layout = create_layout(device, "9 dynamic uniforms", &dynamic_entries)?;
     expect_pipeline_error(device, "9 dynamic uniforms", &[&dynamic_layout], 0)?;
