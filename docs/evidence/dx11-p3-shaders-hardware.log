@@ -1,0 +1,41 @@
+
+running 1 test
+dx11_shaders: enumerated 2 DXGI adapter(s)
+adapter[0] 'Intel(R) HD Graphics 4400' (IntegratedGpu)
+opened D3D11 device on 'Intel(R) HD Graphics 4400' with Features::empty()
+
+=== 1. Naga WGSL vertex and fragment ===
+compiled shader 'scene-shader' entry point 'vs_main' (Vertex): 1155 bytes of HLSL, 1208 bytes of bytecode
+compiled shader 'scene-shader' entry point 'fs_main' (Fragment): 707 bytes of HLSL, 1096 bytes of bytecode
+scene HLSL uses direct samplers and flat registers without a sampler heap
+
+=== 2. production-like fragment corpus ===
+compiled shader 'corpus-shader' entry point 'fs_corpus' (Fragment): 2024 bytes of HLSL, 1684 bytes of bytecode
+corpus fragment with loops, derivatives, arrays and sampling compiled
+
+=== 3. bytecode cache determinism ===
+compiled shader 'cache-shader' entry point 'fs_main' (Fragment): 707 bytes of HLSL, 1096 bytes of bytecode
+compiled shader 'cache-shader' entry point 'fs_main' (Fragment): 707 bytes of HLSL, 1096 bytes of bytecode
+repeated compilation returned identical HLSL and bytecode
+
+=== 4. direct HLSL input ===
+compiled shader 'direct-hlsl' entry point 'vs_direct' (Vertex): 345 bytes of HLSL, 636 bytes of bytecode
+direct HLSL input compiled through FXC
+
+=== 5. HLSL syntax error diagnostics ===
+syntax error reported with shader label, entry point, stage and FXC diagnostic
+
+=== 6. missing entry point ===
+missing entry point reported with shader label, entry point and stage
+
+=== 7. wrong entry point stage ===
+wrong stage reported with shader label, entry point and stage/profile
+
+=== 8. binding absent from the pipeline layout ===
+missing binding reported with shader label, entry point, stage and binding
+dx11_shaders: destroying the queue and device
+dx11_shaders: all shader sections passed
+test dx11_shaders ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+

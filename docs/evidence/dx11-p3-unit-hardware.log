@@ -1,0 +1,14 @@
+
+running 9 tests
+test auxil::tests::test_cap_limits_to_be_under_the_sum_limit ... ok
+test dx11::conv::tests::features_are_exactly_the_two_gate0_flags ... ok
+test dx11::conv::tests::downlevel_flags_shader_model_and_compliance ... ok
+test dx11::conv::tests::limits_match_the_gate0_table_for_10_1 ... ok
+test dx11::conv::tests::limits_match_the_gate0_table_for_11_0 ... ok
+test dx11::types::tests::pipeline_layout_rejects_immediates_and_accepts_none ... ok
+test dx11::types::tests::bind_group_layout_enforces_per_stage_binding_limits ... ok
+test dx11::types::tests::pipeline_layout_requires_context1_for_dynamic_uniforms ... ok
+test test_default_limits ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
