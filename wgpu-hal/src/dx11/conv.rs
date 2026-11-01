@@ -387,7 +387,8 @@ pub fn downlevel_for_feature_level(
 
 /// Minimal set of features that are safe to expose from the skeleton.
 pub fn features_for_feature_level(level: Direct3D::D3D_FEATURE_LEVEL) -> wgt::Features {
-    let mut features = wgt::Features::DEPTH_CLIP_CONTROL;
+    let mut features =
+        wgt::Features::DEPTH_CLIP_CONTROL | wgt::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
     if level.0 >= (Direct3D::D3D_FEATURE_LEVEL_11_0).0 {
         features |= wgt::Features::TEXTURE_COMPRESSION_BC;
     }
