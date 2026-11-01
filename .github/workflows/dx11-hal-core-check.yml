@@ -41,10 +41,15 @@ jobs:
       - name: Run raw-dx11 smoke test
         run: cargo run -p wgpu-hal --example raw-dx11 --features dx11
 
-      - name: Run windowed examples with a bounded timeout
+      - name: Run fence, readback and windowed examples with a bounded timeout
         shell: pwsh
         run: |
-          $examples = @('raw-dx11-window', 'raw-dx11-resize')
+          $examples = @(
+            'raw-dx11-window',
+            'raw-dx11-resize',
+            'raw-dx11-resources',
+            'raw-dx11-triangle'
+          )
           $failed = $false
 
           foreach ($example in $examples) {
@@ -88,6 +93,10 @@ jobs:
             ${{ runner.temp }}/raw-dx11-window.err.log
             ${{ runner.temp }}/raw-dx11-resize.log
             ${{ runner.temp }}/raw-dx11-resize.err.log
+            ${{ runner.temp }}/raw-dx11-resources.log
+            ${{ runner.temp }}/raw-dx11-resources.err.log
+            ${{ runner.temp }}/raw-dx11-triangle.log
+            ${{ runner.temp }}/raw-dx11-triangle.err.log
           if-no-files-found: warn
 
       - name: Check formatting
