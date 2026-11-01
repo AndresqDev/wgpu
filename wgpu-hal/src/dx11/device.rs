@@ -5,7 +5,11 @@
 //! and render pipelines are created here. Compute pipelines, query sets and
 //! acceleration structures remain explicit stubs for later milestones.
 
-use alloc::{ffi::CString, string::ToString as _, vec::Vec};
+use alloc::{
+    ffi::CString,
+    string::{String, ToString as _},
+    vec::Vec,
+};
 use core::{fmt, ptr::NonNull};
 
 use windows::{
@@ -14,8 +18,9 @@ use windows::{
 };
 
 use super::{
-    Api, BindGroup, BindGroupLayout, Buffer, BufferMapMode, CommandBuffer, Fence, PipelineCache,
-    PipelineLayout, RenderPipeline, Resource, Sampler, ShaderModule, Texture, TextureView,
+    debug::DebugLayer, Api, BindGroup, BindGroupLayout, Buffer, BufferMapMode, CommandBuffer,
+    DebugMessage, Fence, PipelineCache, PipelineLayout, RenderPipeline, Resource, Sampler,
+    ShaderModule, Texture, TextureView,
 };
 
 /// Rounds `value` up to a multiple of `alignment`, which must be a power of two.
@@ -89,6 +94,9 @@ pub struct Device {
     info: wgt::AdapterInfo,
     feature_level: Direct3D::D3D_FEATURE_LEVEL,
     limits: wgt::Limits,
+    /// `Some` only when the device was created with
+    /// `D3D11_CREATE_DEVICE_DEBUG` and exposes `ID3D11InfoQueue`.
+    debug_layer: Option<DebugLayer>,
 }
 
 impl fmt::Debug for Device {
@@ -108,12 +116,18 @@ impl Device {
         feature_level: Direct3D::D3D_FEATURE_LEVEL,
         limits: wgt::Limits,
     ) -> Self {
+        // Probe unconditionally: only devices created with
+        // `D3D11_CREATE_DEVICE_DEBUG` expose `ID3D11InfoQueue`, so this is
+        // `None` on the normal path and costs a single interface query.
+        let debug_layer = DebugLayer::new(&raw_device);
+
         Self {
             raw_device,
             raw_context,
             info,
             feature_level,
             limits,
+            debug_layer,
         }
     }
 
@@ -135,6 +149,63 @@ impl Device {
     /// Returns the limits advertised by the adapter.
     pub fn limits(&self) -> &wgt::Limits {
         &self.limits
+    }
+
+    /// Returns whether this device exposes the D3D11 debug layer.
+    pub fn debug_layer_available(&self) -> bool {
+        self.debug_layer.is_some()
+    }
+
+    /// Drains and returns the messages stored by the D3D11 debug layer.
+    ///
+    /// Every message is also logged at the level implied by its severity. A
+    /// device created without the debug layer has no message queue, so this
+    /// returns an empty vector. The returned messages are drained exactly once:
+    /// calling this again returns only messages emitted since the previous
+    /// call.
+    pub fn take_debug_messages(&self) -> Vec<DebugMessage> {
+        let Some(debug_layer) = &self.debug_layer else {
+            return Vec::new();
+        };
+
+        let messages = debug_layer.take_messages();
+        for message in &messages {
+            message.log();
+        }
+        messages
+    }
+
+    /// Returns whether `GetDeviceRemovedReason` reports that the device was
+    /// removed, reset or hung.
+    pub fn is_device_lost(&self) -> bool {
+        // SAFETY: the device interface is valid for the lifetime of `self`.
+        unsafe { self.raw_device.GetDeviceRemovedReason() }.is_err()
+    }
+
+    /// Returns the formatted device removal reason, or `None` for a healthy
+    /// device.
+    pub fn device_removed_reason(&self) -> Option<String> {
+        // SAFETY: the device interface is valid for the lifetime of `self`.
+        match unsafe { self.raw_device.GetDeviceRemovedReason() } {
+            Ok(()) => None,
+            Err(error) => Some(alloc::format!("{error}")),
+        }
+    }
+
+    /// Checks `GetDeviceRemovedReason` and reports a removed device as
+    /// [`crate::DeviceError::Lost`].
+    ///
+    /// This is the single classification point used by fence polling, waits
+    /// and buffer mapping, so a removal discovered through an unrelated call is
+    /// reported consistently as `Lost` rather than `Unexpected`.
+    pub fn check_device_state(&self) -> Result<(), crate::DeviceError> {
+        match self.device_removed_reason() {
+            Some(reason) => {
+                log::error!("the D3D11 device was removed: {reason}");
+                Err(crate::DeviceError::Lost)
+            }
+            None => Ok(()),
+        }
     }
 }
 
@@ -570,7 +641,11 @@ impl crate::Device for Device {
             log::error!(
                 "ID3D11Device::CreateBuffer failed (size {byte_width}, usage {usage:?}): {e}"
             );
-            crate::DeviceError::Unexpected
+            if self.is_device_lost() {
+                crate::DeviceError::Lost
+            } else {
+                crate::DeviceError::Unexpected
+            }
         })?;
 
         let raw = raw.ok_or_else(|| {
@@ -637,6 +712,9 @@ impl crate::Device for Device {
         } {
             buffer.set_unmapped();
             log::error!("ID3D11DeviceContext::Map failed: {e}");
+            // A failed map can be the first symptom of a removed device, which
+            // must be reported as `Lost` rather than an unexpected failure.
+            self.check_device_state()?;
             return Err(crate::DeviceError::Unexpected);
         }
 
@@ -795,7 +873,11 @@ impl crate::Device for Device {
                 desc.mip_level_count,
                 desc.size.depth_or_array_layers
             );
-            crate::DeviceError::Unexpected
+            if self.is_device_lost() {
+                crate::DeviceError::Lost
+            } else {
+                crate::DeviceError::Unexpected
+            }
         })?;
 
         let raw = raw.ok_or_else(|| {
@@ -1001,7 +1083,11 @@ impl crate::Device for Device {
             }
             .map_err(|e| {
                 log::error!("ID3D11Device::CreateShaderResourceView failed: {e}");
-                crate::DeviceError::Unexpected
+                if self.is_device_lost() {
+                    crate::DeviceError::Lost
+                } else {
+                    crate::DeviceError::Unexpected
+                }
             })?;
             srv = raw;
         }
@@ -1041,7 +1127,11 @@ impl crate::Device for Device {
             }
             .map_err(|e| {
                 log::error!("ID3D11Device::CreateRenderTargetView failed: {e}");
-                crate::DeviceError::Unexpected
+                if self.is_device_lost() {
+                    crate::DeviceError::Lost
+                } else {
+                    crate::DeviceError::Unexpected
+                }
             })?;
             rtv = raw;
         }
@@ -1095,7 +1185,11 @@ impl crate::Device for Device {
             }
             .map_err(|e| {
                 log::error!("ID3D11Device::CreateDepthStencilView failed: {e}");
-                crate::DeviceError::Unexpected
+                if self.is_device_lost() {
+                    crate::DeviceError::Lost
+                } else {
+                    crate::DeviceError::Unexpected
+                }
             })?;
             dsv = raw;
         }
@@ -1543,6 +1637,11 @@ impl crate::Device for Device {
         // waiting. This never moves the completed value past real GPU work.
         let pending = fence.pending();
         if pending > fence.completed() {
+            // A live-looking fence can still belong to a removed device; check
+            // before polling so the caller observes `Lost` instead of a value
+            // that will never advance.
+            self.check_device_state()?;
+
             let is_complete =
                 super::queue::query_complete(&self.raw_context, &self.raw_device, fence.query())?;
             if is_complete {
@@ -1563,6 +1662,11 @@ impl crate::Device for Device {
         if fence.completed() >= value {
             return Ok(true);
         }
+
+        // The fence may already be past this value on paper while the device
+        // is gone. Report the removal as `Lost` before deciding whether the
+        // value was ever submitted.
+        self.check_device_state()?;
 
         // The value was never submitted on this fence, so waiting cannot make
         // progress. The HAL contract says callers must not do this; report

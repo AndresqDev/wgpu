@@ -26,9 +26,15 @@ use core::{
     time::Duration,
 };
 
-use windows::{core::BOOL, Win32::Graphics::Direct3D11};
+use windows::{
+    core::BOOL,
+    Win32::{
+        Foundation,
+        Graphics::{Direct3D11, Dxgi},
+    },
+};
 
-use super::{Api, CommandBuffer, Fence, SurfaceTexture};
+use super::{debug::DebugLayer, Api, CommandBuffer, Fence, SurfaceTexture};
 
 /// Upper bound for a single GPU-completion wait.
 ///
@@ -59,6 +65,13 @@ pub struct Queue {
     /// outstanding marker before calling `End` again.
     marker_pending: AtomicBool,
     last_submitted: crate::AtomicFenceValue,
+    /// Debug-layer message queue of the device this queue submits to.
+    ///
+    /// `None` for devices created without `D3D11_CREATE_DEVICE_DEBUG`, so the
+    /// normal path is unchanged. When present, messages are drained into the
+    /// `log` crate after submission, presentation and idle waits instead of
+    /// being left unread in the runtime's bounded queue.
+    debug_layer: Option<DebugLayer>,
 }
 
 impl fmt::Debug for Queue {
@@ -73,6 +86,7 @@ impl fmt::Debug for Queue {
                 "marker_pending",
                 &self.marker_pending.load(Ordering::Relaxed),
             )
+            .field("has_debug_layer", &self.debug_layer.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -90,18 +104,33 @@ impl Queue {
             );
         }
 
+        // Only debug devices expose `ID3D11InfoQueue`; probing here keeps the
+        // normal path unchanged while letting `submit`/`present` surface
+        // debug-layer errors.
+        let debug_layer = DebugLayer::new(&device);
+
         Self {
             context,
             device,
             event_query,
             marker_pending: AtomicBool::new(false),
             last_submitted: Default::default(),
+            debug_layer,
         }
     }
 
     /// Returns the immediate device context used for submission.
     pub fn raw_context(&self) -> &Direct3D11::ID3D11DeviceContext {
         &self.context
+    }
+
+    /// Drains the debug layer, if this queue has one, and logs the messages.
+    ///
+    /// No-op on devices created without the debug flag.
+    fn report_debug_messages(&self) {
+        if let Some(debug_layer) = &self.debug_layer {
+            debug_layer.report();
+        }
     }
 
     /// Returns the queue's idle marker, or an explicit error when it could not
@@ -146,6 +175,17 @@ fn device_removed(device: &Direct3D11::ID3D11Device) -> Option<windows::core::Er
     }
 }
 
+/// Returns whether `code` is a DXGI failure that means the device is gone.
+///
+/// D3D11 reports removal, reset and hang with distinct HRESULTs; all three
+/// invalidate the device and must surface as [`crate::DeviceError::Lost`] (or
+/// [`crate::SurfaceError::Lost`]) instead of a generic unexpected error.
+pub(crate) fn is_device_loss_hresult(code: windows::core::HRESULT) -> bool {
+    code == Dxgi::DXGI_ERROR_DEVICE_REMOVED
+        || code == Dxgi::DXGI_ERROR_DEVICE_RESET
+        || code == Dxgi::DXGI_ERROR_DEVICE_HUNG
+}
+
 /// Performs one non-blocking completion check on a `D3D11_QUERY_EVENT` marker.
 ///
 /// `D3D11_QUERY_EVENT` writes a `BOOL` that becomes `TRUE` once the GPU has
@@ -175,6 +215,13 @@ pub(crate) fn query_complete(
     match result {
         Ok(()) => Ok(complete.as_bool()),
         Err(error) => {
+            if is_device_loss_hresult(error.code()) {
+                log::error!(
+                    "ID3D11DeviceContext::GetData(D3D11_QUERY_EVENT) failed because the \
+                     device was removed, reset or hung: {error}"
+                );
+                return Err(crate::DeviceError::Lost);
+            }
             if let Some(reason) = device_removed(device) {
                 log::error!(
                     "ID3D11DeviceContext::GetData(D3D11_QUERY_EVENT) failed because the \
@@ -238,7 +285,29 @@ impl crate::Queue for Queue {
 
         if let Some(error) = device_removed(&self.device) {
             log::error!("cannot submit to the D3D11 device because it was removed: {error}");
+            self.report_debug_messages();
             return Err(crate::DeviceError::Lost);
+        }
+
+        // The HAL contract says a fence value lower than the highest submitted
+        // value has no effect. Commands still execute immediately on the
+        // immediate context, so flush the already-recorded work, but do not arm
+        // another marker: reusing an out-of-order value would make `wait`
+        // publish completion for a value that this marker does not cover.
+        if fence_value <= fence.pending() {
+            log::warn!(
+                "ignoring D3D11 fence value {fence_value}: the fence already has a higher \
+                 submitted value {}",
+                fence.pending()
+            );
+            unsafe { self.context.Flush() };
+            if let Some(error) = device_removed(&self.device) {
+                log::error!("the D3D11 device was removed while flushing ignored work: {error}");
+                self.report_debug_messages();
+                return Err(crate::DeviceError::Lost);
+            }
+            self.report_debug_messages();
+            return Ok(());
         }
 
         // The same event query cannot be re-armed while a marker is still in
@@ -262,6 +331,7 @@ impl crate::Queue for Queue {
                     "the previous submission on this D3D11 fence did not complete within \
                      {GPU_WAIT_TIMEOUT:?}; refusing to re-arm its completion query"
                 );
+                self.report_debug_messages();
                 return Err(crate::DeviceError::Unexpected);
             }
         }
@@ -276,10 +346,12 @@ impl crate::Queue for Queue {
 
         if let Some(error) = device_removed(&self.device) {
             log::error!("the D3D11 device was removed while submitting work: {error}");
+            self.report_debug_messages();
             return Err(crate::DeviceError::Lost);
         }
 
         self.last_submitted.fetch_max(fence_value, Ordering::AcqRel);
+        self.report_debug_messages();
 
         Ok(())
     }
@@ -291,6 +363,7 @@ impl crate::Queue for Queue {
     ) -> Result<(), crate::SurfaceError> {
         if let Some(error) = device_removed(&self.device) {
             log::error!("cannot present with a removed D3D11 device: {error}");
+            self.report_debug_messages();
             return Err(crate::SurfaceError::Lost);
         }
 
@@ -300,9 +373,11 @@ impl crate::Queue for Queue {
         // driver reset between frames), so check again afterwards.
         if let Some(error) = device_removed(&self.device) {
             log::error!("the D3D11 device was removed while presenting: {error}");
+            self.report_debug_messages();
             return Err(crate::SurfaceError::Lost);
         }
 
+        self.report_debug_messages();
         result
     }
 
@@ -311,6 +386,7 @@ impl crate::Queue for Queue {
 
         if let Some(error) = device_removed(&self.device) {
             log::error!("cannot wait for the D3D11 queue because the device was removed: {error}");
+            self.report_debug_messages();
             return Err(crate::DeviceError::Lost);
         }
 
@@ -329,10 +405,12 @@ impl crate::Queue for Queue {
                         "timed out waiting for the outstanding D3D11 queue marker; the queue \
                          is not idle"
                     );
+                    self.report_debug_messages();
                     return Err(crate::DeviceError::Unexpected);
                 }
                 Err(error) => {
                     self.marker_pending.store(true, Ordering::Release);
+                    self.report_debug_messages();
                     return Err(error);
                 }
             }
@@ -344,10 +422,12 @@ impl crate::Queue for Queue {
 
         if let Some(error) = device_removed(&self.device) {
             log::error!("the D3D11 device was removed while flushing for idle: {error}");
+            self.report_debug_messages();
             return Err(crate::DeviceError::Lost);
         }
 
         let result = wait_for_query(&self.context, &self.device, query, Some(GPU_WAIT_TIMEOUT));
+        self.report_debug_messages();
         match result {
             Ok(true) => {
                 self.marker_pending.store(false, Ordering::Release);
@@ -366,5 +446,35 @@ impl crate::Queue for Queue {
 
     unsafe fn get_timestamp_period(&self) -> f32 {
         1.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_device_loss_hresults() {
+        for code in [
+            Dxgi::DXGI_ERROR_DEVICE_REMOVED,
+            Dxgi::DXGI_ERROR_DEVICE_RESET,
+            Dxgi::DXGI_ERROR_DEVICE_HUNG,
+        ] {
+            assert!(
+                is_device_loss_hresult(code),
+                "{code:?} must be classified as device loss"
+            );
+        }
+
+        for code in [
+            Dxgi::DXGI_ERROR_INVALID_CALL,
+            Foundation::E_INVALIDARG,
+            Foundation::E_FAIL,
+        ] {
+            assert!(
+                !is_device_loss_hresult(code),
+                "{code:?} must not be classified as device loss"
+            );
+        }
     }
 }

@@ -8,15 +8,21 @@ use windows::Win32::{
     Graphics::{Direct3D, Direct3D11, Dxgi},
 };
 
-use super::{conv, device::Device, queue::Queue};
+use super::{conv, debug::DebugLayer, device::Device, queue::Queue};
 
 /// Creates an `ID3D11Device` for the given DXGI adapter.
 ///
 /// `D3D_DRIVER_TYPE_UNKNOWN` is required when an explicit adapter is passed.
 /// The requested feature levels are the ones the backend promises to support:
 /// Direct3D 11.0 and 10.1.
+///
+/// When `debug` is set, `D3D11_CREATE_DEVICE_DEBUG` is requested in addition to
+/// the mandatory BGRA support. Creating a debug device requires
+/// `d3d11sdklayers.dll`; callers are responsible for retrying without the flag
+/// when it is missing.
 pub(super) unsafe fn create_device(
     adapter: &Dxgi::IDXGIAdapter1,
+    debug: bool,
 ) -> windows::core::Result<(
     Direct3D11::ID3D11Device,
     Direct3D11::ID3D11DeviceContext,
@@ -28,6 +34,11 @@ pub(super) unsafe fn create_device(
         Direct3D::D3D_FEATURE_LEVEL_10_1,
     ];
 
+    let mut flags = Direct3D11::D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+    if debug {
+        flags |= Direct3D11::D3D11_CREATE_DEVICE_DEBUG;
+    }
+
     let mut device: Option<Direct3D11::ID3D11Device> = None;
     let mut context: Option<Direct3D11::ID3D11DeviceContext> = None;
     let mut feature_level = Direct3D::D3D_FEATURE_LEVEL::default();
@@ -37,7 +48,7 @@ pub(super) unsafe fn create_device(
             adapter,
             Direct3D::D3D_DRIVER_TYPE_UNKNOWN,
             Foundation::HMODULE::default(),
-            Direct3D11::D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            flags,
             Some(&feature_levels),
             Direct3D11::D3D11_SDK_VERSION,
             Some(&mut device),
@@ -64,6 +75,9 @@ pub struct Adapter {
     dedicated_video_memory: u64,
     shared_system_memory: u64,
     capabilities: crate::Capabilities,
+    /// Whether the instance requested the debug layer and the validation
+    /// device exposed `ID3D11InfoQueue`.
+    debug_layer_available: bool,
 }
 
 impl fmt::Debug for Adapter {
@@ -81,20 +95,45 @@ impl fmt::Debug for Adapter {
 
 impl Adapter {
     /// Enumerates one DXGI adapter and creates a D3D11 device to validate it.
+    ///
+    /// When `debug` is requested and the debug layer is not installed, the
+    /// adapter is validated again without `D3D11_CREATE_DEVICE_DEBUG` instead
+    /// of being rejected: a missing SDK layer must not hide a usable adapter.
     pub(super) unsafe fn expose(
         raw: Dxgi::IDXGIAdapter1,
+        debug: bool,
     ) -> Option<crate::ExposedAdapter<super::Api>> {
         let desc = unsafe { raw.GetDesc1() }.ok()?;
-        let (device, _context, feature_level) = match unsafe { create_device(&raw) } {
+        let (device, _context, feature_level) = match unsafe { create_device(&raw, debug) } {
             Ok(created) => created,
-            Err(e) => {
+            Err(error) if debug => {
+                log::error!(
+                    "D3D11CreateDevice with the debug layer requested failed for adapter {} \
+                     (HRESULT {:#010x}): {error}; the D3D11 debug layer is unavailable, retrying \
+                     without it",
+                    conv::map_adapter_name(desc.Description),
+                    error.code().0,
+                );
+                match unsafe { create_device(&raw, false) } {
+                    Ok(created) => created,
+                    Err(error) => {
+                        log::warn!(
+                            "D3D11CreateDevice failed for adapter {}: {error}",
+                            conv::map_adapter_name(desc.Description)
+                        );
+                        return None;
+                    }
+                }
+            }
+            Err(error) => {
                 log::warn!(
-                    "D3D11CreateDevice failed for adapter {}: {e}",
+                    "D3D11CreateDevice failed for adapter {}: {error}",
                     conv::map_adapter_name(desc.Description)
                 );
                 return None;
             }
         };
+        let debug_layer_available = debug && DebugLayer::new(&device).is_some();
 
         let software =
             Dxgi::DXGI_ADAPTER_FLAG(desc.Flags as i32).contains(Dxgi::DXGI_ADAPTER_FLAG_SOFTWARE);
@@ -152,6 +191,7 @@ impl Adapter {
                 dedicated_video_memory: desc.DedicatedVideoMemory as u64,
                 shared_system_memory: desc.SharedSystemMemory as u64,
                 capabilities: capabilities.clone(),
+                debug_layer_available,
             },
             info,
             features,
@@ -183,6 +223,18 @@ impl Adapter {
     pub fn shared_system_memory(&self) -> u64 {
         self.shared_system_memory
     }
+
+    /// Returns whether the instance requested the D3D11 debug layer and it was
+    /// available when this adapter was enumerated.
+    ///
+    /// This is `false` when the instance flags did not ask for debugging or
+    /// when `d3d11sdklayers.dll` is not installed. A device opened from this
+    /// adapter only has `ID3D11InfoQueue` when this returns `true`;
+    /// [`super::Device::debug_layer_available`] reports the actual state of the
+    /// opened device.
+    pub fn debug_layer_available(&self) -> bool {
+        self.debug_layer_available
+    }
 }
 
 impl crate::Adapter for Adapter {
@@ -194,11 +246,30 @@ impl crate::Adapter for Adapter {
         _limits: &wgt::Limits,
         _memory_hints: &wgt::MemoryHints,
     ) -> Result<crate::OpenDevice<super::Api>, crate::DeviceError> {
-        let (raw_device, context, feature_level) =
-            unsafe { create_device(&self.raw) }.map_err(|e| {
-                log::error!("D3D11CreateDevice failed while opening adapter: {e}");
-                crate::DeviceError::Lost
-            })?;
+        let debug = self.debug_layer_available;
+        let (raw_device, context, feature_level) = match unsafe { create_device(&self.raw, debug) }
+        {
+            Ok(created) => created,
+            Err(error) if debug => {
+                log::error!(
+                    "D3D11CreateDevice with the debug layer requested failed while opening \
+                         the adapter (HRESULT {:#010x}): {error}; retrying without the D3D11 \
+                         debug layer",
+                    error.code().0,
+                );
+                match unsafe { create_device(&self.raw, false) } {
+                    Ok(created) => created,
+                    Err(error) => {
+                        log::error!("D3D11CreateDevice failed while opening adapter: {error}");
+                        return Err(crate::DeviceError::Lost);
+                    }
+                }
+            }
+            Err(error) => {
+                log::error!("D3D11CreateDevice failed while opening adapter: {error}");
+                return Err(crate::DeviceError::Lost);
+            }
+        };
 
         let device = Device::new(
             raw_device.clone(),

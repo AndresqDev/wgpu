@@ -11,6 +11,14 @@ provides compilable stubs for the rest of the `wgpu-hal` API.
 - [`Instance::enumerate_adapters`](crate::Instance::enumerate_adapters)
   enumerates `IDXGIAdapter1`s and validates each one by creating an
   `ID3D11Device` at feature level 11.0 or 10.1.
+- [`InstanceFlags::DEBUG`](wgt::InstanceFlags::DEBUG) and
+  [`InstanceFlags::VALIDATION`](wgt::InstanceFlags::VALIDATION) request
+  `D3D11_CREATE_DEVICE_DEBUG`. When the D3D11 debug layer
+  (`d3d11sdklayers.dll`) is installed, [`Adapter::debug_layer_available`]
+  reports it, devices expose [`Device::take_debug_messages`], and queued
+  messages are drained and logged after `submit`, `present` and idle waits.
+  When the layer is missing, device creation retries without the debug flag
+  instead of rejecting the adapter, so normal operation is unaffected.
 - [`Instance::create_surface`](crate::Instance::create_surface) creates a
   windowed [`Surface`] for a Win32 `HWND`.
 - [`Adapter::open`](crate::Adapter::open) creates a fresh `ID3D11Device` and
@@ -63,8 +71,12 @@ provides compilable stubs for the rest of the `wgpu-hal` API.
   pending; `wait` polls the marker and only then advances the completed value.
   [`Device::get_fence_value`](crate::Device::get_fence_value) reports the
   highest GPU-completed value, not the highest submitted one. Device removal is
-  reported as `DeviceError::Lost` / `SurfaceError::Lost` from submit, present
-  and the wait paths.
+  classified as `DeviceError::Lost` / `SurfaceError::Lost` from submit, present
+  and the wait paths. [`Device::is_device_lost`], [`Device::check_device_state`]
+  and [`Device::device_removed_reason`] expose the same check to callers, and
+  resource creation and mapping turn a removal discovered through
+  `GetDeviceRemovedReason` into `DeviceError::Lost` instead of an unexpected
+  error.
 - `maximum_frame_latency` is accepted by `Surface::configure` but not enforced;
   DXGI uses its own frame-latency queue for flip-model swap chains.
 
@@ -81,6 +93,7 @@ encoding still executes immediately on the immediate context and
 mod adapter;
 mod command;
 mod conv;
+mod debug;
 mod device;
 mod instance;
 mod queue;
@@ -90,6 +103,7 @@ mod types;
 
 pub use adapter::Adapter;
 pub use command::CommandBuffer;
+pub use debug::{DebugMessage, DebugSeverity};
 pub use device::Device;
 pub use instance::Instance;
 pub use queue::Queue;
