@@ -35,16 +35,21 @@ fn unexpected(message: &str) -> crate::DeviceError {
 
 fn map_buffer_bind_flags(usage: wgt::BufferUses) -> u32 {
     let mut bind_flags = 0u32;
+    let storage =
+        usage.intersects(wgt::BufferUses::STORAGE_READ_ONLY | wgt::BufferUses::STORAGE_READ_WRITE);
     if usage.contains(wgt::BufferUses::VERTEX) {
         bind_flags |= Direct3D11::D3D11_BIND_VERTEX_BUFFER.0 as u32;
     }
     if usage.contains(wgt::BufferUses::INDEX) {
         bind_flags |= Direct3D11::D3D11_BIND_INDEX_BUFFER.0 as u32;
     }
-    if usage.contains(wgt::BufferUses::UNIFORM) {
+    // D3D11 constant buffers cannot share a resource with any other bind
+    // flag. Bevy's visibility-range buffer advertises UNIFORM as a fallback
+    // but selects storage on this adapter; expose it as a raw SRV, not a CBV.
+    if usage.contains(wgt::BufferUses::UNIFORM) && !storage {
         bind_flags |= Direct3D11::D3D11_BIND_CONSTANT_BUFFER.0 as u32;
     }
-    if usage.intersects(wgt::BufferUses::STORAGE_READ_ONLY | wgt::BufferUses::STORAGE_READ_WRITE) {
+    if storage {
         // Read-only storage buffers are exposed to shaders as raw SRVs
         // (`ByteAddressBuffer` in the generated HLSL).
         bind_flags |= Direct3D11::D3D11_BIND_SHADER_RESOURCE.0 as u32;
