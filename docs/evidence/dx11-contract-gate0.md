@@ -132,7 +132,7 @@ que pase contra este pin sería un test roto, no una buena noticia.
 | 1 | `TEXTURE_COMPRESSION_BC` anunciado en FL 11_0 y no en el set objetivo | §4.1 / §4.3 |
 | 2 | Conjunto de `DownlevelFlags` más amplio que el objetivo y `is_webgpu_compliant()` verdadero por herencia de `compliant()` | §5 |
 | 3 | `MULTISAMPLE_X4` presente en formatos con `RENDER_TARGET` | §6.2 |
-| 4 | Formatos BC/ETC2/ASTC/`Stencil8`/`Rgb9e5Ufloat` no devuelven capacidades vacías (BC) o no fallan de forma explícita y homogénea | §6.2 |
+| 4 | `TEXTURE_COMPRESSION_BC` se anuncia aunque BC no está mapeado. Las capacidades por formato de BC/ETC2/ASTC/`Stencil8`/`Rgb9e5Ufloat` sí son vacías en el pin, así que ese control negativo pasa; el fallo real es el anuncio de feature (#1) | §6.2 |
 | 5 | Límites de storage > 0 (`max_storage_buffers_per_shader_stage = 4`, offsets dinámicos de storage) | §7 |
 | 6 | Límites de compute > 0 (`max_compute_workgroup_storage_size`, invocaciones, workgroups por dimensión) | §7 |
 | 7 | `max_texture_dimension_1d = 16384/8192` y `max_texture_dimension_3d = 2048` en vez de `0` | §7 |
@@ -140,7 +140,7 @@ que pase contra este pin sería un test roto, no una buena noticia.
 | 9 | `create_bind_group_layout` acepta storage buffers/texturas y offsets dinámicos de storage | §8 |
 | 10 | `create_pipeline_layout` acepta `immediate_size = 4` con `max_immediate_size == 0` | §8 |
 | 11 | `create_compute_pipeline`, `create_query_set` y las entradas de ray tracing panican con `unimplemented!()` en vez de devolver error explícito | §8 |
-| 12 | Texturas 1D/3D, MSAA con `sample_count > 1` y view formats arbitrarios no fallan todavía con error explícito y uniforme | §8 / §9 (positivos/negativos) |
+| 12 | Los controles negativos de texturas 1D/3D, MSAA con `sample_count > 1`, render pass/pipeline MSAA y view formats arbitrarios **sí devuelven error explícito en el pin**, por lo que deben pasar y quedan como guardas de regresión. El sobre-anuncio relacionado es `MULTISAMPLE_X4` por formato (#3), no la ruta de creación | §8 / §9 (positivos/negativos) |
 
 ## 8. Consecuencia operativa (no oculta)
 
