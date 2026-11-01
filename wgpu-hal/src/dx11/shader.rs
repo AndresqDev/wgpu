@@ -339,6 +339,7 @@ fn shader_error(
     crate::ShaderError::Compilation(alloc::format!(
         "shader '{}' entry point '{}' ({stage:?}, {profile}): {detail}",
         label.unwrap_or("<unnamed>"),
+        entry_point,
     ))
 }
 
