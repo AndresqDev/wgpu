@@ -368,7 +368,7 @@ pub fn limits_for_feature_level(level: Direct3D::D3D_FEATURE_LEVEL) -> wgt::Limi
     let max_texture_dimension_2d = if supports_storage { 16384 } else { 8192 };
 
     wgt::Limits {
-        max_texture_dimension_1d: 0,
+        max_texture_dimension_1d: 1,
         max_texture_dimension_2d,
         max_texture_dimension_3d: 1,
         max_texture_array_layers: 2048,
@@ -604,9 +604,9 @@ mod tests {
     /// `supports_storage` selects the read-only storage limits advertised at
     /// feature level 11_0; feature level 10_1 advertises none.
     fn assert_gate0_limits(limits: wgt::Limits, expected_2d: u32, supports_storage: bool) {
-        assert_eq!(limits.max_texture_dimension_1d, 0);
+        assert_eq!(limits.max_texture_dimension_1d, 1);
         assert_eq!(limits.max_texture_dimension_2d, expected_2d);
-        assert_eq!(limits.max_texture_dimension_3d, 0);
+        assert_eq!(limits.max_texture_dimension_3d, 1);
         assert_eq!(limits.max_texture_array_layers, 2048);
         assert_eq!(limits.max_bind_groups, 4);
         assert_eq!(limits.max_bind_groups_plus_vertex_buffers, 24);

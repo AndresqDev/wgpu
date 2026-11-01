@@ -524,6 +524,82 @@ fn create_blend_state(
 }
 
 impl Device {
+    /// Creates the 1x1 sampled 1D fallback texture used by Bevy's fallback
+    /// image set. General 1D storage and rendering are not exposed.
+    unsafe fn create_texture1d(
+        &self,
+        desc: &crate::TextureDescriptor,
+    ) -> Result<Texture, crate::DeviceError> {
+        if desc.sample_count != 1 {
+            return Err(unexpected(
+                "D3D11 1D textures currently support sample_count == 1 only",
+            ));
+        }
+        if desc.size.width == 0 || desc.size.height != 1 || desc.size.depth_or_array_layers != 1 {
+            return Err(unexpected("D3D11 only advertises 1x1 1D textures"));
+        }
+        if desc.size.width > 1 || desc.mip_level_count != 1 {
+            return Err(unexpected(
+                "D3D11 only advertises a 1x1 single-mip 1D texture",
+            ));
+        }
+        if desc.usage.intersects(
+            wgt::TextureUses::STORAGE_READ_ONLY
+                | wgt::TextureUses::STORAGE_WRITE_ONLY
+                | wgt::TextureUses::STORAGE_READ_WRITE
+                | wgt::TextureUses::STORAGE_ATOMIC
+                | wgt::TextureUses::COLOR_TARGET
+                | wgt::TextureUses::DEPTH_STENCIL_READ
+                | wgt::TextureUses::DEPTH_STENCIL_WRITE,
+        ) {
+            return Err(unexpected(
+                "D3D11 1D textures are sampled-only; render and storage usages are unsupported",
+            ));
+        }
+        for view_format in &desc.view_formats {
+            if !texture_formats_compatible(desc.format, *view_format) {
+                return Err(unexpected(
+                    "D3D11 1D texture view formats must be compatible with the base format",
+                ));
+            }
+        }
+        let format = super::conv::map_texture_format_resource(desc.format)
+            .ok_or_else(|| unexpected("texture format is not supported by the D3D11 backend"))?;
+        let texture_desc = Direct3D11::D3D11_TEXTURE1D_DESC {
+            Width: desc.size.width,
+            MipLevels: desc.mip_level_count,
+            ArraySize: 1,
+            Format: format,
+            Usage: Direct3D11::D3D11_USAGE_DEFAULT,
+            BindFlags: Direct3D11::D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let mut raw: Option<Direct3D11::ID3D11Texture1D> = None;
+        unsafe {
+            self.raw_device
+                .CreateTexture1D(&texture_desc, None, Some(&mut raw))
+        }
+        .map_err(|e| {
+            log::error!("ID3D11Device::CreateTexture1D failed: {e}");
+            if self.is_device_lost() {
+                crate::DeviceError::Lost
+            } else {
+                crate::DeviceError::Unexpected
+            }
+        })?;
+        let raw = raw.ok_or_else(|| {
+            unexpected("ID3D11Device::CreateTexture1D succeeded without returning a texture")
+        })?;
+        Ok(Texture::new1d(
+            raw,
+            desc.format,
+            desc.size,
+            desc.mip_level_count,
+            desc.usage,
+        ))
+    }
+
     /// Creates the tiny 3D fallback/LUT textures used by Bevy's tonemapping
     /// pipeline. The contract advertises only 1x1x1 volume textures; general
     /// 3D rendering and copies remain outside the supported surface.
@@ -608,6 +684,66 @@ impl Device {
 }
 
 impl Device {
+    /// Creates a sampled SRV over the 1x1 fallback texture used by Bevy.
+    unsafe fn create_texture1d_view(
+        &self,
+        texture: &Texture,
+        desc: &crate::TextureViewDescriptor,
+    ) -> Result<TextureView, crate::DeviceError> {
+        if texture.dimension() != wgt::TextureDimension::D1 {
+            return Err(unexpected("D3D11 1D texture view requires a 1D texture"));
+        }
+        if !desc.usage.contains(wgt::TextureUses::RESOURCE) {
+            return Err(unexpected(
+                "D3D11 1D texture views currently support sampled resources only",
+            ));
+        }
+        if !texture_formats_compatible(texture.format(), desc.format) {
+            return Err(unexpected(
+                "D3D11 texture views must use a compatible format",
+            ));
+        }
+        let base_mip = desc.range.base_mip_level;
+        let mip_count = desc
+            .range
+            .mip_level_count
+            .unwrap_or_else(|| texture.mip_level_count().saturating_sub(base_mip));
+        if mip_count == 0 || base_mip + mip_count > texture.mip_level_count() {
+            return Err(unexpected(
+                "D3D11 1D texture view subresource range is outside the texture",
+            ));
+        }
+        let format = super::conv::map_srv_format(desc.format, desc.range.aspect)
+            .ok_or_else(|| unexpected("D3D11 SRV format is not supported"))?;
+        let mut raw_desc = Direct3D11::D3D11_SHADER_RESOURCE_VIEW_DESC::default();
+        raw_desc.Format = format;
+        raw_desc.ViewDimension = Direct3D::D3D_SRV_DIMENSION_TEXTURE1D;
+        raw_desc.Anonymous.Texture1D = Direct3D11::D3D11_TEX1D_SRV {
+            MostDetailedMip: base_mip,
+            MipLevels: mip_count,
+        };
+        let mut raw: Option<Direct3D11::ID3D11ShaderResourceView> = None;
+        unsafe {
+            self.raw_device.CreateShaderResourceView(
+                texture.raw1d(),
+                Some(&raw_desc),
+                Some(&mut raw),
+            )
+        }
+        .map_err(|e| {
+            log::error!("ID3D11Device::CreateShaderResourceView(texture1d) failed: {e}");
+            if self.is_device_lost() {
+                crate::DeviceError::Lost
+            } else {
+                crate::DeviceError::Unexpected
+            }
+        })?;
+        let srv = raw.ok_or_else(|| {
+            unexpected("ID3D11Device::CreateShaderResourceView(texture1d) returned no view")
+        })?;
+        Ok(TextureView::from_parts(Some(srv), None, None, format))
+    }
+
     /// Creates a sampled SRV over the 1x1x1 volume textures used as Bevy LUT
     /// placeholders. No render-target or UAV 3D views are exposed.
     unsafe fn create_texture3d_view(
@@ -700,14 +836,9 @@ impl crate::Device for Device {
             // A raw buffer SRV is created with the buffer staged as a shader
             // resource. Mixing it with constant buffers, vertex/index data or
             // indirect arguments would silently drop one of the bindings.
-            if usage.intersects(
-                wgt::BufferUses::VERTEX
-                    | wgt::BufferUses::INDEX
-                    | wgt::BufferUses::UNIFORM
-                    | wgt::BufferUses::INDIRECT,
-            ) {
+            if usage.intersects(wgt::BufferUses::UNIFORM | wgt::BufferUses::INDIRECT) {
                 return Err(unexpected(
-                    "D3D11 storage buffers cannot be combined with VERTEX, INDEX, UNIFORM or INDIRECT usage",
+                    "D3D11 storage buffers cannot be combined with UNIFORM or INDIRECT usage",
                 ));
             }
         }
@@ -1017,8 +1148,11 @@ impl crate::Device for Device {
         &self,
         desc: &crate::TextureDescriptor,
     ) -> Result<Texture, crate::DeviceError> {
+        if desc.dimension == wgt::TextureDimension::D1 {
+            return unsafe { self.create_texture1d(desc) };
+        }
         if desc.dimension == wgt::TextureDimension::D3 {
-            return self.create_texture3d(desc);
+            return unsafe { self.create_texture3d(desc) };
         }
         if desc.dimension != wgt::TextureDimension::D2 {
             return Err(unexpected(
@@ -1180,13 +1314,11 @@ impl crate::Device for Device {
     ) -> Result<TextureView, crate::DeviceError> {
         use Direct3D11 as d3d;
 
-        if desc.dimension == wgt::TextureViewDimension::D3 {
-            return self.create_texture3d_view(texture, desc);
-        }
         if desc.dimension == wgt::TextureViewDimension::D1 {
-            return Err(unexpected(
-                "D3D11 texture views support 2D and 3D dimensions only",
-            ));
+            return unsafe { self.create_texture1d_view(texture, desc) };
+        }
+        if desc.dimension == wgt::TextureViewDimension::D3 {
+            return unsafe { self.create_texture3d_view(texture, desc) };
         }
 
         let is_cube = matches!(
@@ -1332,7 +1464,7 @@ impl crate::Device for Device {
                 }
                 wgt::TextureViewDimension::D1 | wgt::TextureViewDimension::D3 => {
                     return Err(unexpected(
-                        "D3D11 SRV views currently support 2D dimensions only",
+                        "D3D11 SRV views currently support the handled dimensions only",
                     ));
                 }
             }

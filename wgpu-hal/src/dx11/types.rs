@@ -187,6 +187,7 @@ impl Borrow<dyn crate::DynBuffer> for Buffer {
 #[derive(Clone, Debug)]
 pub struct Texture {
     raw: Option<Direct3D11::ID3D11Texture2D>,
+    raw1d: Option<Direct3D11::ID3D11Texture1D>,
     raw3d: Option<Direct3D11::ID3D11Texture3D>,
     dimension: wgt::TextureDimension,
     format: wgt::TextureFormat,
@@ -210,6 +211,7 @@ impl Texture {
     ) -> Self {
         Self {
             raw: Some(raw),
+            raw1d: None,
             raw3d: None,
             dimension: wgt::TextureDimension::D2,
             format,
@@ -230,8 +232,30 @@ impl Texture {
     ) -> Self {
         Self {
             raw: None,
+            raw1d: None,
             raw3d: Some(raw),
             dimension: wgt::TextureDimension::D3,
+            format,
+            extent,
+            mip_level_count,
+            array_layer_count: 1,
+            sample_count: 1,
+            usage,
+        }
+    }
+
+    pub(crate) fn new1d(
+        raw: Direct3D11::ID3D11Texture1D,
+        format: wgt::TextureFormat,
+        extent: wgt::Extent3d,
+        mip_level_count: u32,
+        usage: wgt::TextureUses,
+    ) -> Self {
+        Self {
+            raw: None,
+            raw1d: Some(raw),
+            raw3d: None,
+            dimension: wgt::TextureDimension::D1,
             format,
             extent,
             mip_level_count,
@@ -278,6 +302,12 @@ impl Texture {
         self.raw
             .as_ref()
             .expect("D3D11 2D texture accessor called for a 3D texture")
+    }
+
+    pub(crate) fn raw1d(&self) -> &Direct3D11::ID3D11Texture1D {
+        self.raw1d
+            .as_ref()
+            .expect("D3D11 1D texture accessor called for a non-1D texture")
     }
 
     pub(crate) fn raw3d(&self) -> &Direct3D11::ID3D11Texture3D {

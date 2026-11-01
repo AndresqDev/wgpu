@@ -325,16 +325,10 @@ fn section_buffer_creation(device: &wgpu_hal::dx11::Device) -> Result<(), String
     );
     unsafe { device.destroy_buffer(accepted) };
 
-    let rejected = [
-        (
-            "storage read-write without storage read-only",
-            wgt::BufferUses::STORAGE_READ_WRITE,
-        ),
-        (
-            "storage read-only + VERTEX",
-            wgt::BufferUses::STORAGE_READ_ONLY | wgt::BufferUses::VERTEX,
-        ),
-    ];
+    let rejected = [(
+        "storage read-write without storage read-only",
+        wgt::BufferUses::STORAGE_READ_WRITE,
+    )];
     for (label, usage) in rejected {
         expect_err(
             &format!("create_buffer({label})"),

@@ -553,7 +553,7 @@ fn check_limits(
         }
     }
 
-    check_limit!(max_texture_dimension_1d, 0);
+    check_limit!(max_texture_dimension_1d, 1);
     check_limit!(max_texture_dimension_2d, max_texture_dimension_2d);
     check_limit!(max_texture_dimension_3d, 1);
     check_limit!(max_texture_array_layers, 2048);
@@ -1262,21 +1262,44 @@ fn negative_tests(
     };
     expect_err(failures, &description, call);
 
-    // 5. 1D textures are not implemented; only the 1x1x1 sampled volume
-    // placeholder used by Bevy's tonemapping pipeline is supported.
-    let description = format!("{label}: create_texture(TextureDimension::D1)");
-    let call = || unsafe {
-        let result = device.create_texture(&texture_desc(
-            "contract 1D texture",
+    // 5. Only the 1x1 sampled 1D fallback and the 1x1x1 sampled volume
+    // placeholder used by Bevy's fallback/tonemapping paths are supported.
+    let maybe_line = unsafe {
+        device.create_texture(&texture_desc(
+            "contract 1D fallback",
             wgt::TextureFormat::Rgba8Unorm,
             wgt::TextureDimension::D1,
-            extent(4, 1, 1),
+            extent(1, 1, 1),
             1,
-            wgt::TextureUses::RESOURCE,
-        ));
-        result.map(|_| ())
+            wgt::TextureUses::RESOURCE | wgt::TextureUses::COPY_DST,
+        ))
     };
-    expect_err(failures, &description, call);
+    match maybe_line {
+        Ok(line) => {
+            let maybe_view = unsafe {
+                device.create_texture_view(
+                    &line,
+                    &wgpu_hal::TextureViewDescriptor {
+                        label: Some("contract 1D fallback view"),
+                        format: wgt::TextureFormat::Rgba8Unorm,
+                        dimension: wgt::TextureViewDimension::D1,
+                        usage: wgt::TextureUses::RESOURCE,
+                        range: full_view_range(),
+                    },
+                )
+            };
+            match maybe_view {
+                Ok(view) => unsafe { device.destroy_texture_view(view) },
+                Err(error) => failures.push(format!(
+                    "{label}: create_texture_view(TextureDimension::D1) failed: {error:?}"
+                )),
+            }
+            unsafe { device.destroy_texture(line) };
+        }
+        Err(error) => failures.push(format!(
+            "{label}: create_texture(TextureDimension::D1 1x1) failed: {error:?}"
+        )),
+    }
 
     let maybe_volume = unsafe {
         device.create_texture(&texture_desc(
