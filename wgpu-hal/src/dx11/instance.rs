@@ -36,7 +36,7 @@ impl crate::Instance for Instance {
         // features that this skeleton does not use yet.
         let factory =
             unsafe { Dxgi::CreateDXGIFactory1::<Dxgi::IDXGIFactory1>() }.map_err(|e| {
-                crate::InstanceError::with_source(String::from("failed to create IDXGIFactory1"), e)
+                crate::InstanceError::new(format!("failed to create IDXGIFactory1: {e}"))
             })?;
 
         Ok(Self {
