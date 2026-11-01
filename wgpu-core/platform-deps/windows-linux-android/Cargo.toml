@@ -19,6 +19,7 @@ rust-version = "1.76"
 [features]
 gles = ["wgpu-hal/gles"]
 vulkan = ["wgpu-hal/vulkan"]
+dx11 = ["wgpu-hal/dx11"]
 dx12 = ["wgpu-hal/dx12"]
 renderdoc = ["wgpu-hal/renderdoc"]
 

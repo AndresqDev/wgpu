@@ -120,6 +120,9 @@ impl Instance {
         if cfg!(metal) {
             backends = backends.union(Backends::METAL);
         }
+        if cfg!(dx11) {
+            backends = backends.union(Backends::DX11);
+        }
         if cfg!(dx12) {
             backends = backends.union(Backends::DX12);
         }

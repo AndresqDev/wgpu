@@ -1,0 +1,34 @@
+name: DX11 core wiring check
+
+on:
+  push:
+    branches: [dx11-core-wiring]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  check:
+    name: Check wgpu-core and wgpu with DX11
+    runs-on: windows-2025
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check wgpu-hal
+        run: cargo check -p wgpu-hal --features dx11
+
+      - name: Check wgpu-core
+        run: cargo check -p wgpu-core --no-default-features --features dx11,std
+
+      - name: Check wgpu
+        run: cargo check -p wgpu --no-default-features --features dx11,std,wgsl

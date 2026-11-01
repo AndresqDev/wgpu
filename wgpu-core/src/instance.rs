@@ -84,6 +84,8 @@ impl Instance {
         this.try_add_hal(hal::api::Vulkan, &instance_desc, telemetry);
         #[cfg(metal)]
         this.try_add_hal(hal::api::Metal, &instance_desc, telemetry);
+        #[cfg(dx11)]
+        this.try_add_hal(hal::api::Dx11, &instance_desc, telemetry);
         #[cfg(dx12)]
         this.try_add_hal(hal::api::Dx12, &instance_desc, telemetry);
         #[cfg(gles)]
