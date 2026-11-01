@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - dx11-resources
+      - dx11-hal-resources
 
 permissions:
   contents: read
@@ -31,6 +32,13 @@ jobs:
 
       - name: Check wgpu-hal with the DX11 backend
         run: cargo check -p wgpu-hal --features dx11
+
+      - name: Run the DX11 resources test
+        shell: bash
+        # `pipefail` keeps the cargo exit code visible through `tee`.
+        run: |
+          set -o pipefail
+          cargo test -p wgpu-hal --features dx11 --test dx11_resources -- --nocapture 2>&1 | tee dx11-resources-test.log
 
       - name: Run raw-dx11-resources
         shell: pwsh
@@ -67,6 +75,7 @@ jobs:
           path: |
             ${{ runner.temp }}/raw-dx11-resources.log
             ${{ runner.temp }}/raw-dx11-resources.err.log
+            dx11-resources-test.log
           if-no-files-found: warn
 
       - name: Check formatting
