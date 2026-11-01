@@ -28,15 +28,26 @@ provides compilable stubs for the rest of the `wgpu-hal` API.
   [`Device::create_sampler`](crate::Device::create_sampler) create real D3D11
   resources. Copy commands upload data from staging buffers; the
   `raw-dx11-resources` example exercises this path.
-- Bind groups, pipelines and shaders are still stubs. Their creation methods
-  call `unimplemented!`.
+- [`Device::create_bind_group_layout`](crate::Device::create_bind_group_layout),
+  [`Device::create_pipeline_layout`](crate::Device::create_pipeline_layout) and
+  [`Device::create_bind_group`](crate::Device::create_bind_group) create CPU-side
+  bind group objects. Registers are flattened into separate `b`/`t`/`u`/`s`
+  counters in the pipeline layout; nothing is bound to the context yet.
+- [`Device::create_shader_module`](crate::Device::create_shader_module) stores
+  Naga IR or HLSL source. [`compile_shader`] translates Naga IR to HLSL with
+  direct sampler registers and compiles it with FXC for Shader Model 5.0. The
+  `raw-dx11-shader` example exercises this path.
+- Render/compute pipelines, draws, dispatches and real bind-group binding are
+  still stubs. Their creation methods call `unimplemented!` or are no-ops.
 
 ## Next steps
 
-The immediate next milestone is to make command encoding and submission
-ordered: create deferred `ID3D11DeviceContext`s (or record into command lists)
-and execute them from [`Queue::submit`](crate::Queue::submit), instead of
-clearing during recording. Bind groups, shaders and pipelines can then follow.
+The next milestone is render pipelines: create D3D11 shader objects from the
+compiled bytecode, define input layouts and rasterizer/depth-stencil state, and
+bind the CPU-side bind groups from
+[`CommandEncoder::set_bind_group`](crate::CommandEncoder::set_bind_group).
+Command encoding and submission also still need deferred contexts so recorded
+work is executed in order from [`Queue::submit`](crate::Queue::submit).
 */
 
 #![allow(unused_variables)]
@@ -56,11 +67,13 @@ pub use command::CommandBuffer;
 pub use device::Device;
 pub use instance::Instance;
 pub use queue::Queue;
-pub use shader::ShaderModule;
+pub use shader::{compile_shader, CompiledShader, ShaderEntryPoint, ShaderModule};
 pub use surface::Surface;
 pub(crate) use types::BufferMapMode;
 pub use types::{
-    Buffer, Fence, PipelineCache, Resource, Sampler, SurfaceTexture, Texture, TextureView,
+    BindGroup, BindGroupLayout, BindGroupLayoutEntry, BoundBuffer, BoundSampler, BoundTexture,
+    Buffer, Fence, PipelineCache, PipelineLayout, Resource, Sampler, SurfaceTexture, Texture,
+    TextureView,
 };
 
 /// The D3D11 backend marker type.
@@ -87,9 +100,9 @@ impl crate::Api for Api {
     type QuerySet = Resource;
     type Fence = Fence;
 
-    type BindGroupLayout = Resource;
-    type BindGroup = Resource;
-    type PipelineLayout = Resource;
+    type BindGroupLayout = BindGroupLayout;
+    type BindGroup = BindGroup;
+    type PipelineLayout = PipelineLayout;
     type ShaderModule = ShaderModule;
     type RenderPipeline = Resource;
     type ComputePipeline = Resource;
@@ -101,12 +114,15 @@ impl crate::Api for Api {
 
 crate::impl_dyn_resource!(
     Adapter,
+    BindGroup,
+    BindGroupLayout,
     Buffer,
     CommandBuffer,
     Device,
     Fence,
     Instance,
     PipelineCache,
+    PipelineLayout,
     Queue,
     Resource,
     Sampler,
@@ -118,14 +134,14 @@ crate::impl_dyn_resource!(
 );
 
 impl crate::DynAccelerationStructure for Resource {}
-impl crate::DynBindGroup for Resource {}
-impl crate::DynBindGroupLayout for Resource {}
+impl crate::DynBindGroup for BindGroup {}
+impl crate::DynBindGroupLayout for BindGroupLayout {}
 impl crate::DynBuffer for Buffer {}
 impl crate::DynCommandBuffer for CommandBuffer {}
 impl crate::DynComputePipeline for Resource {}
 impl crate::DynFence for Fence {}
 impl crate::DynPipelineCache for PipelineCache {}
-impl crate::DynPipelineLayout for Resource {}
+impl crate::DynPipelineLayout for PipelineLayout {}
 impl crate::DynQuerySet for Resource {}
 impl crate::DynRenderPipeline for Resource {}
 impl crate::DynRayTracingPipeline for Resource {}

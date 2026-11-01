@@ -18,7 +18,9 @@ use windows::Win32::{
     Graphics::{Direct3D11, Dxgi},
 };
 
-use super::{Api, Buffer, BufferMapMode, Resource, Texture, TextureView};
+use super::{
+    Api, BindGroup, Buffer, BufferMapMode, PipelineLayout, Resource, Texture, TextureView,
+};
 
 /// D3D11 requires staging buffer sizes to be a multiple of four bytes.
 fn align_to(value: u64, alignment: u64) -> u64 {
@@ -704,14 +706,21 @@ impl crate::CommandEncoder for CommandBuffer {
 
     unsafe fn set_bind_group(
         &mut self,
-        _layout: &Resource,
+        _layout: &PipelineLayout,
         _index: u32,
-        _group: &Resource,
+        _group: &BindGroup,
         _dynamic_offsets: &[wgt::DynamicOffset],
     ) {
+        // Bind groups are CPU-side descriptions until render pipelines exist.
     }
 
-    unsafe fn set_immediates(&mut self, _layout: &Resource, _offset_bytes: u32, _data: &[u32]) {}
+    unsafe fn set_immediates(
+        &mut self,
+        _layout: &PipelineLayout,
+        _offset_bytes: u32,
+        _data: &[u32],
+    ) {
+    }
 
     unsafe fn insert_debug_marker(&mut self, _label: &str) {}
     unsafe fn begin_debug_marker(&mut self, _group_label: &str) {}
