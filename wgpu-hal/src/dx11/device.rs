@@ -1602,26 +1602,13 @@ impl crate::Device for Device {
     unsafe fn destroy_query_set(&self, _set: Resource) {}
 
     unsafe fn create_fence(&self) -> Result<Fence, crate::DeviceError> {
-        let desc = Direct3D11::D3D11_QUERY_DESC {
-            Query: Direct3D11::D3D11_QUERY_EVENT,
-            MiscFlags: 0,
-        };
-
-        let mut query: Option<Direct3D11::ID3D11Query> = None;
-        match unsafe { self.raw_device.CreateQuery(&desc, Some(&mut query)) } {
-            Ok(()) => query
-                .map(Fence::new)
-                .ok_or_else(|| unexpected("CreateQuery(D3D11_QUERY_EVENT) returned no query")),
-            Err(error) => {
-                log::error!("ID3D11Device::CreateQuery(D3D11_QUERY_EVENT) failed: {error}");
-                Err(crate::DeviceError::Unexpected)
-            }
-        }
+        Fence::new(&self.raw_device)
     }
 
     unsafe fn destroy_fence(&self, _fence: Fence) {
-        // Dropping the fence releases its `ID3D11Query`. No explicit D3D11
-        // call is needed, and the query must not be used afterwards.
+        // Dropping the fence releases its pool of `ID3D11Query` objects. No
+        // explicit D3D11 call is needed, and the queries must not be used
+        // afterwards.
     }
 
     unsafe fn get_fence_value(
@@ -1632,24 +1619,20 @@ impl crate::Device for Device {
         // so report the highest value the GPU has actually completed, never
         // the highest value merely submitted.
         //
-        // Poll the marker once without blocking first: `Poll`-style callers
-        // rely on repeated `get_fence_value` calls to observe progress without
-        // waiting. This never moves the completed value past real GPU work.
-        let pending = fence.pending();
-        if pending > fence.completed() {
-            // A live-looking fence can still belong to a removed device; check
-            // before polling so the caller observes `Lost` instead of a value
-            // that will never advance.
-            self.check_device_state()?;
-
-            let is_complete =
-                super::queue::query_complete(&self.raw_context, &self.raw_device, fence.query())?;
-            if is_complete {
-                fence.note_completed(pending);
-            }
+        // Fast path: nothing is in flight, so no GPU poll is needed.
+        if fence.pending() <= fence.completed() {
+            return Ok(fence.completed());
         }
 
-        Ok(fence.completed())
+        // A live-looking fence can still belong to a removed device; check
+        // before polling so the caller observes `Lost` instead of a value that
+        // will never advance.
+        self.check_device_state()?;
+
+        // Poll every armed pool slot once without blocking. `Poll`-style
+        // callers rely on repeated `get_fence_value` calls to observe progress
+        // without waiting.
+        fence.get_completed_value(&self.raw_context, &self.raw_device)
     }
 
     unsafe fn wait(
@@ -1680,25 +1663,12 @@ impl crate::Device for Device {
             return Ok(false);
         }
 
-        // Poll the per-fence `D3D11_QUERY_EVENT` marker. Only a marker the GPU
-        // has actually reached reports completion here, so `completed_value`
-        // is never advanced on a CPU-only guess. The value is snapshotted so a
-        // newer submission (which cannot happen concurrently under the HAL's
-        // synchronization contract) is never published as complete early.
-        let pending = fence.pending();
-        if super::queue::wait_for_query(
-            &self.raw_context,
-            &self.raw_device,
-            fence.query(),
-            timeout,
-        )? {
-            fence.note_completed(pending);
-            Ok(true)
-        } else {
-            // Timed out with the marker still in flight; the next wait (or the
-            // next submit, which retires the marker) will observe it.
-            Ok(false)
-        }
+        // Poll the fence's armed `D3D11_QUERY_EVENT` pool slots. Only a marker
+        // the GPU has actually reached reports completion, so `completed_value`
+        // is never advanced on a CPU-only guess. The wait loop does not hold
+        // the slot mutex while sleeping, and a timeout leaves the markers armed
+        // for the next wait or submission.
+        fence.wait(&self.raw_context, &self.raw_device, value, timeout)
     }
 
     unsafe fn start_graphics_debugger_capture(&self) -> bool {

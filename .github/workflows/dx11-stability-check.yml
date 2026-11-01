@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - dx11-hal-stability
+      - dx11-query-pool
 
 permissions:
   contents: read
@@ -32,6 +33,9 @@ jobs:
       - name: Check wgpu-hal with the DX11 backend
         run: cargo check -p wgpu-hal --features dx11
 
+      - name: Run pure DX11 capability and query-timeout tests
+        run: cargo test -p wgpu-hal --features dx11 --lib
+
       - name: Run DX11 regression and stability tests
         run: >-
           cargo test -p wgpu-hal --features dx11
@@ -42,6 +46,7 @@ jobs:
           --test dx11_pipelines
           --test dx11_debug
           --test dx11_device_loss
+          --test dx11_query_pool
           -- --nocapture
 
       - name: Run window and resize examples

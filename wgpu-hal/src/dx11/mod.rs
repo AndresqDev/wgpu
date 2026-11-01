@@ -66,9 +66,12 @@ provides compilable stubs for the rest of the `wgpu-hal` API.
   `ID3D11DeviceContext::GetData` on that marker with a bounded five-second
   timeout.
 - [`Device::wait`](crate::Device::wait) waits for real GPU completion. Each
-  [`Fence`] owns its own `D3D11_QUERY_EVENT`: `submit` retires the previous
-  marker, arms the fence query before flushing and records the value as
-  pending; `wait` polls the marker and only then advances the completed value.
+  [`Fence`] owns a pool of eight `D3D11_QUERY_EVENT` markers. `submit` arms a
+  free slot before flushing and records the value as pending. When all slots
+  are still in flight, `submit` waits briefly for the oldest marker and, if it
+  does not complete, rotates that slot to a fresh query instead of blocking the
+  next submission. `wait` polls the armed slots and advances the completed
+  value only to values whose marker the GPU actually reached.
   [`Device::get_fence_value`](crate::Device::get_fence_value) reports the
   highest GPU-completed value, not the highest submitted one. Device removal is
   classified as `DeviceError::Lost` / `SurfaceError::Lost` from submit, present
@@ -96,6 +99,7 @@ mod conv;
 mod debug;
 mod device;
 mod instance;
+mod query;
 mod queue;
 mod shader;
 mod surface;
@@ -106,14 +110,15 @@ pub use command::CommandBuffer;
 pub use debug::{DebugMessage, DebugSeverity};
 pub use device::Device;
 pub use instance::Instance;
+pub use query::Fence;
 pub use queue::Queue;
 pub use shader::{compile_shader, CompiledShader, ShaderEntryPoint, ShaderModule};
 pub use surface::Surface;
 pub(crate) use types::BufferMapMode;
 pub use types::{
     BindGroup, BindGroupLayout, BindGroupLayoutEntry, BoundBuffer, BoundSampler, BoundTexture,
-    Buffer, Fence, PipelineCache, PipelineLayout, RenderPipeline, Resource, Sampler,
-    SurfaceTexture, Texture, TextureView,
+    Buffer, PipelineCache, PipelineLayout, RenderPipeline, Resource, Sampler, SurfaceTexture,
+    Texture, TextureView,
 };
 
 /// The D3D11 backend marker type.
