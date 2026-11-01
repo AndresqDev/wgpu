@@ -1149,10 +1149,10 @@ impl crate::Device for Device {
         desc: &crate::TextureDescriptor,
     ) -> Result<Texture, crate::DeviceError> {
         if desc.dimension == wgt::TextureDimension::D1 {
-            return self.create_texture1d(desc);
+            return unsafe { self.create_texture1d(desc) };
         }
         if desc.dimension == wgt::TextureDimension::D3 {
-            return self.create_texture3d(desc);
+            return unsafe { self.create_texture3d(desc) };
         }
         if desc.dimension != wgt::TextureDimension::D2 {
             return Err(unexpected(
@@ -1314,13 +1314,11 @@ impl crate::Device for Device {
     ) -> Result<TextureView, crate::DeviceError> {
         use Direct3D11 as d3d;
 
-        if desc.dimension == wgt::TextureViewDimension::D3 {
-            return self.create_texture3d_view(texture, desc);
-        }
         if desc.dimension == wgt::TextureViewDimension::D1 {
-            return Err(unexpected(
-                "D3D11 texture views support 2D and 3D dimensions only",
-            ));
+            return unsafe { self.create_texture1d_view(texture, desc) };
+        }
+        if desc.dimension == wgt::TextureViewDimension::D3 {
+            return unsafe { self.create_texture3d_view(texture, desc) };
         }
 
         let is_cube = matches!(
@@ -1466,7 +1464,7 @@ impl crate::Device for Device {
                 }
                 wgt::TextureViewDimension::D1 | wgt::TextureViewDimension::D3 => {
                     return Err(unexpected(
-                        "D3D11 SRV views currently support 2D dimensions only",
+                        "D3D11 SRV views currently support the handled dimensions only",
                     ));
                 }
             }
