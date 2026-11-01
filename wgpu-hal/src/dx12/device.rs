@@ -1484,6 +1484,7 @@ impl crate::Device for super::Device {
                 fake_missing_bindings: false,
                 special_constants_binding,
                 immediates_target,
+                sampler_binding_mode: hlsl::SamplerBindingMode::Heap,
                 dynamic_storage_buffer_offsets_targets,
                 zero_initialize_workgroup_memory: true,
                 restrict_indexing: true,
