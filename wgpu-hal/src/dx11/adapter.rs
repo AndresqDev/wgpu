@@ -103,7 +103,8 @@ impl Adapter {
         let uma = unsafe {
             device.CheckFeatureSupport(
                 Direct3D11::D3D11_FEATURE_D3D11_OPTIONS2,
-                (&mut options2 as *mut Direct3D11::D3D11_FEATURE_DATA_D3D11_OPTIONS2).cast::<core::ffi::c_void>(),
+                (&mut options2 as *mut Direct3D11::D3D11_FEATURE_DATA_D3D11_OPTIONS2)
+                    .cast::<core::ffi::c_void>(),
                 size_of_val(&options2) as u32,
             )
         }
@@ -227,7 +228,8 @@ impl crate::Adapter for Adapter {
         let result = unsafe {
             self.device.CheckFeatureSupport(
                 Direct3D11::D3D11_FEATURE_FORMAT_SUPPORT,
-                (&mut support as *mut Direct3D11::D3D11_FEATURE_DATA_FORMAT_SUPPORT).cast::<core::ffi::c_void>(),
+                (&mut support as *mut Direct3D11::D3D11_FEATURE_DATA_FORMAT_SUPPORT)
+                    .cast::<core::ffi::c_void>(),
                 size_of_val(&support) as u32,
             )
         };
