@@ -148,6 +148,17 @@ altera el diagnóstico.
 
 ## 7. Verificación del candidato verde (P6+P1)
 
+> **Nota de superación (2026-11-01).** La rama `dx11-storage-readonly`
+> (base `47057539f`) sustituye el objetivo histórico de storage de esta
+> sección: ahora se anuncian storage buffers **read-only** en FL 11_0 con
+> `max_storage_buffers_per_shader_stage = 4`,
+> `max_storage_buffer_binding_size = 128 MiB`,
+> `VERTEX_STORAGE|FRAGMENT_STORAGE` y `min_storage_buffer_offset_alignment =
+> 256`. Compute, UAV/read-write, storage textures, offsets dinámicos y arrays
+> siguen fuera. Las filas y datos históricos de los runs de Gate 0 que
+> aparecen debajo no se modifican; la nueva evidencia está en
+> [`dx11-storage-readonly.md`](./dx11-storage-readonly.md).
+
 Run `41308541042`, commit `1deb02958`, `windows-2025`. El paso
 `cargo test -p wgpu-hal --features dx11 --test dx11_contract -- --nocapture`
 terminó con **1 passed; 0 failed; 0 ignored** (0.04 s). El mismo test que falló

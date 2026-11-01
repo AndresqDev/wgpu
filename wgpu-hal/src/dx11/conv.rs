@@ -355,14 +355,17 @@ pub fn map_stencil_face(face: &wgt::StencilFaceState) -> Direct3D11::D3D11_DEPTH
 /// Feature-dependent limits.
 ///
 /// This is the Gate 0 contract table: every field is spelled out explicitly so
-/// that the adapter report matches the documented target exactly. Storage and
-/// compute limits are zero because the backend does not implement them yet.
+/// that the adapter report matches the documented target exactly.
+///
+/// Read-only storage buffers are exposed at feature level 11_0 and above:
+/// Naga emits `ByteAddressBuffer` for `var<storage, read>`, which D3D11 binds
+/// through a raw buffer SRV. Feature level 10_x supports `ByteAddressBuffer`
+/// only optionally, so storage limits stay zero there. Compute, storage
+/// textures, writable storage and dynamic storage offsets are not implemented
+/// at any level.
 pub fn limits_for_feature_level(level: Direct3D::D3D_FEATURE_LEVEL) -> wgt::Limits {
-    let max_texture_dimension_2d = if level.0 >= (Direct3D::D3D_FEATURE_LEVEL_11_0).0 {
-        16384
-    } else {
-        8192
-    };
+    let supports_storage = level.0 >= (Direct3D::D3D_FEATURE_LEVEL_11_0).0;
+    let max_texture_dimension_2d = if supports_storage { 16384 } else { 8192 };
 
     wgt::Limits {
         max_texture_dimension_1d: 0,
@@ -376,14 +379,14 @@ pub fn limits_for_feature_level(level: Direct3D::D3D_FEATURE_LEVEL) -> wgt::Limi
         max_dynamic_storage_buffers_per_pipeline_layout: 0,
         max_sampled_textures_per_shader_stage: 16,
         max_samplers_per_shader_stage: 8,
-        max_storage_buffers_per_shader_stage: 0,
+        max_storage_buffers_per_shader_stage: if supports_storage { 4 } else { 0 },
         max_storage_textures_per_shader_stage: 0,
         max_uniform_buffers_per_shader_stage: 7,
         max_binding_array_elements_per_shader_stage: 0,
         max_binding_array_acceleration_structure_elements_per_shader_stage: 0,
         max_binding_array_sampler_elements_per_shader_stage: 0,
         max_uniform_buffer_binding_size: 16384,
-        max_storage_buffer_binding_size: 0,
+        max_storage_buffer_binding_size: if supports_storage { 128 << 20 } else { 0 },
         max_vertex_buffers: 8,
         max_buffer_size: 268435456,
         max_vertex_attributes: 16,
@@ -430,16 +433,25 @@ pub fn limits_for_feature_level(level: Direct3D::D3D_FEATURE_LEVEL) -> wgt::Limi
 /// Gate 0 exposes exactly the flags below and nothing else; in particular it
 /// does not start from [`wgt::DownlevelFlags::compliant`], so
 /// `is_webgpu_compliant()` is always false.
+///
+/// `VERTEX_STORAGE` and `FRAGMENT_STORAGE` describe read-only storage buffers,
+/// which the backend implements through raw SRVs at feature level 11_0 and
+/// above. `FRAGMENT_WRITABLE_STORAGE` stays unset because UAV storage is not
+/// implemented.
 pub fn downlevel_for_feature_level(
     level: Direct3D::D3D_FEATURE_LEVEL,
 ) -> wgt::DownlevelCapabilities {
-    let flags = wgt::DownlevelFlags::BASE_VERTEX
+    let mut flags = wgt::DownlevelFlags::BASE_VERTEX
         | wgt::DownlevelFlags::NON_POWER_OF_TWO_MIPMAPPED_TEXTURES
         | wgt::DownlevelFlags::CUBE_ARRAY_TEXTURES
         | wgt::DownlevelFlags::COMPARISON_SAMPLERS
         | wgt::DownlevelFlags::INDEPENDENT_BLEND
         | wgt::DownlevelFlags::FULL_DRAW_INDEX_UINT32
         | wgt::DownlevelFlags::DEPTH_BIAS_CLAMP;
+
+    if level.0 >= (Direct3D::D3D_FEATURE_LEVEL_11_0).0 {
+        flags |= wgt::DownlevelFlags::VERTEX_STORAGE | wgt::DownlevelFlags::FRAGMENT_STORAGE;
+    }
 
     wgt::DownlevelCapabilities {
         flags,
@@ -489,14 +501,20 @@ mod tests {
 
     use windows::Win32::Graphics::Direct3D::{D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0};
 
-    fn expected_downlevel_flags() -> wgt::DownlevelFlags {
-        wgt::DownlevelFlags::BASE_VERTEX
+    fn expected_downlevel_flags(level: Direct3D::D3D_FEATURE_LEVEL) -> wgt::DownlevelFlags {
+        let mut flags = wgt::DownlevelFlags::BASE_VERTEX
             | wgt::DownlevelFlags::NON_POWER_OF_TWO_MIPMAPPED_TEXTURES
             | wgt::DownlevelFlags::CUBE_ARRAY_TEXTURES
             | wgt::DownlevelFlags::COMPARISON_SAMPLERS
             | wgt::DownlevelFlags::INDEPENDENT_BLEND
             | wgt::DownlevelFlags::FULL_DRAW_INDEX_UINT32
-            | wgt::DownlevelFlags::DEPTH_BIAS_CLAMP
+            | wgt::DownlevelFlags::DEPTH_BIAS_CLAMP;
+
+        if level.0 >= (D3D_FEATURE_LEVEL_11_0).0 {
+            flags |= wgt::DownlevelFlags::VERTEX_STORAGE | wgt::DownlevelFlags::FRAGMENT_STORAGE;
+        }
+
+        flags
     }
 
     #[test]
@@ -523,11 +541,38 @@ mod tests {
             let downlevel = downlevel_for_feature_level(level);
             assert_eq!(
                 downlevel.flags,
-                expected_downlevel_flags(),
+                expected_downlevel_flags(level),
                 "unexpected downlevel flags for {level:?}"
             );
             assert_eq!(downlevel.shader_model, shader_model);
             assert_eq!(downlevel.limits, wgt::DownlevelLimits::default());
+            let expects_storage = level == D3D_FEATURE_LEVEL_11_0;
+            assert_eq!(
+                downlevel
+                    .flags
+                    .contains(wgt::DownlevelFlags::VERTEX_STORAGE),
+                expects_storage,
+                "VERTEX_STORAGE mismatch for {level:?}"
+            );
+            assert_eq!(
+                downlevel
+                    .flags
+                    .contains(wgt::DownlevelFlags::FRAGMENT_STORAGE),
+                expects_storage,
+                "FRAGMENT_STORAGE mismatch for {level:?}"
+            );
+            assert!(
+                !downlevel
+                    .flags
+                    .contains(wgt::DownlevelFlags::FRAGMENT_WRITABLE_STORAGE),
+                "FRAGMENT_WRITABLE_STORAGE must not be advertised for {level:?}"
+            );
+            assert!(
+                !downlevel
+                    .flags
+                    .contains(wgt::DownlevelFlags::COMPUTE_SHADERS),
+                "COMPUTE_SHADERS must not be advertised for {level:?}"
+            );
             assert!(
                 !downlevel.is_webgpu_compliant(),
                 "DX11 must never report WebGPU compliance for {level:?}"
@@ -537,17 +582,28 @@ mod tests {
 
     #[test]
     fn limits_match_the_gate0_table_for_11_0() {
-        assert_gate0_limits(limits_for_feature_level(D3D_FEATURE_LEVEL_11_0), 16384);
+        assert_gate0_limits(
+            limits_for_feature_level(D3D_FEATURE_LEVEL_11_0),
+            16384,
+            true,
+        );
     }
 
     #[test]
     fn limits_match_the_gate0_table_for_10_1() {
-        assert_gate0_limits(limits_for_feature_level(D3D_FEATURE_LEVEL_10_1), 8192);
+        assert_gate0_limits(
+            limits_for_feature_level(D3D_FEATURE_LEVEL_10_1),
+            8192,
+            false,
+        );
     }
 
     /// Asserts every Gate 0 limit value, plus that no other field differs from
     /// the explicit table (the table is spelled out field by field).
-    fn assert_gate0_limits(limits: wgt::Limits, expected_2d: u32) {
+    ///
+    /// `supports_storage` selects the read-only storage limits advertised at
+    /// feature level 11_0; feature level 10_1 advertises none.
+    fn assert_gate0_limits(limits: wgt::Limits, expected_2d: u32, supports_storage: bool) {
         assert_eq!(limits.max_texture_dimension_1d, 0);
         assert_eq!(limits.max_texture_dimension_2d, expected_2d);
         assert_eq!(limits.max_texture_dimension_3d, 0);
@@ -559,7 +615,10 @@ mod tests {
         assert_eq!(limits.max_dynamic_storage_buffers_per_pipeline_layout, 0);
         assert_eq!(limits.max_sampled_textures_per_shader_stage, 16);
         assert_eq!(limits.max_samplers_per_shader_stage, 8);
-        assert_eq!(limits.max_storage_buffers_per_shader_stage, 0);
+        assert_eq!(
+            limits.max_storage_buffers_per_shader_stage,
+            if supports_storage { 4 } else { 0 }
+        );
         assert_eq!(limits.max_storage_textures_per_shader_stage, 0);
         assert_eq!(limits.max_uniform_buffers_per_shader_stage, 7);
         assert_eq!(limits.max_binding_array_elements_per_shader_stage, 0);
@@ -572,7 +631,10 @@ mod tests {
             0
         );
         assert_eq!(limits.max_uniform_buffer_binding_size, 16384);
-        assert_eq!(limits.max_storage_buffer_binding_size, 0);
+        assert_eq!(
+            limits.max_storage_buffer_binding_size,
+            if supports_storage { 128 << 20 } else { 0 }
+        );
         assert_eq!(limits.max_vertex_buffers, 8);
         assert_eq!(limits.max_buffer_size, 268435456);
         assert_eq!(limits.max_vertex_attributes, 16);

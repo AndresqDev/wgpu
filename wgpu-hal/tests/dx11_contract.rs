@@ -367,6 +367,17 @@ fn run_contract(failures: &mut Vec<String>) -> Result<(), String> {
         if let Err(error) = positive_smoke(&device) {
             failures.push(format!("{label}: positive HAL smoke failed: {error}"));
         }
+        if exposed.adapter.feature_level_name() == "11_0" {
+            if let Err(error) = positive_storage_smoke(&device, &queue) {
+                failures.push(format!("{label}: positive storage smoke failed: {error}"));
+            }
+        } else {
+            println!(
+                "  note: feature level {} does not advertise read-only storage; \
+                 positive storage smoke skipped",
+                exposed.adapter.feature_level_name()
+            );
+        }
 
         negative_tests(&label, &device, &queue, failures);
         surface_negative_tests(&label, &surface, &device, failures);
@@ -406,13 +417,21 @@ fn check_features_and_downlevel(
 
     let downlevel = &exposed.capabilities.downlevel;
     let flags = downlevel.flags;
-    let expected_flags = wgt::DownlevelFlags::BASE_VERTEX
+    let feature_level = exposed.adapter.feature_level_name();
+    let mut expected_flags = wgt::DownlevelFlags::BASE_VERTEX
         | wgt::DownlevelFlags::NON_POWER_OF_TWO_MIPMAPPED_TEXTURES
         | wgt::DownlevelFlags::CUBE_ARRAY_TEXTURES
         | wgt::DownlevelFlags::COMPARISON_SAMPLERS
         | wgt::DownlevelFlags::INDEPENDENT_BLEND
         | wgt::DownlevelFlags::FULL_DRAW_INDEX_UINT32
         | wgt::DownlevelFlags::DEPTH_BIAS_CLAMP;
+    // Read-only storage buffers are exposed through raw SRVs at feature level
+    // 11_0. Feature level 10_1 does not advertise them: D3D11 only guarantees
+    // optional `ByteAddressBuffer` support there.
+    if feature_level == "11_0" {
+        expected_flags |=
+            wgt::DownlevelFlags::VERTEX_STORAGE | wgt::DownlevelFlags::FRAGMENT_STORAGE;
+    }
     let announced_flags: Vec<&str> = flags.iter_names().map(|(name, _)| name).collect();
     println!("  downlevel flags: {announced_flags:?}");
     for (name, bit) in flags.iter_names() {
@@ -432,11 +451,31 @@ fn check_features_and_downlevel(
         ));
     }
 
+    // Writable storage, compute and non-16-byte-aligned buffer bindings are
+    // still not implemented. Advertising any of them would let `wgpu-core`
+    // build pipelines the backend cannot bind.
+    for (name, flag) in [
+        (
+            "FRAGMENT_WRITABLE_STORAGE",
+            wgt::DownlevelFlags::FRAGMENT_WRITABLE_STORAGE,
+        ),
+        ("COMPUTE_SHADERS", wgt::DownlevelFlags::COMPUTE_SHADERS),
+        (
+            "BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED",
+            wgt::DownlevelFlags::BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED,
+        ),
+    ] {
+        if flags.contains(flag) {
+            failures.push(format!(
+                "{label}: {name} must not be advertised by the DX11 backend"
+            ));
+        }
+    }
+
     if downlevel.is_webgpu_compliant() {
         failures.push(format!("{label}: is_webgpu_compliant() must be false"));
     }
 
-    let feature_level = exposed.adapter.feature_level_name();
     let expected_shader_model = match feature_level {
         "11_0" => Some(wgt::ShaderModel::Sm5),
         "10_1" => Some(wgt::ShaderModel::Sm4),
@@ -463,6 +502,8 @@ fn check_limits(
     let limits = &exposed.capabilities.limits;
     let feature_level = exposed.adapter.feature_level_name();
     let max_texture_dimension_2d = if feature_level == "10_1" { 8192 } else { 16384 };
+    // Read-only storage buffers are advertised only at feature level 11_0.
+    let supports_storage = feature_level == "11_0";
 
     // Defined inside the function so the local `limits`/`label`/`failures`
     // bindings are visible at the macro definition site (macro_rules is
@@ -523,7 +564,10 @@ fn check_limits(
     check_limit!(max_dynamic_storage_buffers_per_pipeline_layout, 0);
     check_limit!(max_sampled_textures_per_shader_stage, 16);
     check_limit!(max_samplers_per_shader_stage, 8);
-    check_limit!(max_storage_buffers_per_shader_stage, 0);
+    check_limit!(
+        max_storage_buffers_per_shader_stage,
+        if supports_storage { 4 } else { 0 }
+    );
     check_limit!(max_storage_textures_per_shader_stage, 0);
     check_limit!(max_uniform_buffers_per_shader_stage, 7);
     check_limit!(max_binding_array_elements_per_shader_stage, 0);
@@ -533,7 +577,10 @@ fn check_limits(
     );
     check_limit!(max_binding_array_sampler_elements_per_shader_stage, 0);
     check_limit!(max_uniform_buffer_binding_size, 16384);
-    check_limit!(max_storage_buffer_binding_size, 0);
+    check_limit!(
+        max_storage_buffer_binding_size,
+        if supports_storage { 128 << 20 } else { 0 }
+    );
     check_limit!(max_vertex_buffers, 8);
     check_limit!(max_buffer_size, 268435456);
     check_limit!(max_vertex_attributes, 16);
@@ -983,6 +1030,115 @@ fn positive_smoke(device: &wgpu_hal::dx11::Device) -> Result<(), String> {
     Ok(())
 }
 
+/// Positive smoke for the read-only storage path: bind group layout, pipeline
+/// layout, a storage buffer, a raw-SRV bind group and `set_bind_group`.
+///
+/// Only called for feature level 11_0, which is where the backend advertises
+/// storage buffers. It does not draw; the end-to-end draw/read-back coverage
+/// lives in `dx11_storage.rs`.
+fn positive_storage_smoke(
+    device: &wgpu_hal::dx11::Device,
+    queue: &wgpu_hal::dx11::Queue,
+) -> Result<(), String> {
+    const STORAGE_SIZE: u64 = 512;
+    const STORAGE_OFFSET: u64 = 256;
+    const STORAGE_BINDING_SIZE: u64 = 16;
+
+    let storage_buffer = unsafe {
+        device.create_buffer(&wgpu_hal::BufferDescriptor {
+            label: Some("contract storage buffer"),
+            size: STORAGE_SIZE,
+            usage: wgt::BufferUses::STORAGE_READ_ONLY
+                | wgt::BufferUses::STORAGE_READ_WRITE
+                | wgt::BufferUses::COPY_DST,
+            memory_flags: wgpu_hal::MemoryFlags::empty(),
+        })
+    }
+    .map_err(|e| format!("create storage buffer: {e:?}"))?;
+
+    let layout_entries = [wgt::BindGroupLayoutEntry {
+        binding: 0,
+        visibility: wgt::ShaderStages::VERTEX_FRAGMENT,
+        ty: wgt::BindingType::Buffer {
+            ty: wgt::BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: wgt::BufferSize::new(STORAGE_BINDING_SIZE),
+        },
+        count: None,
+    }];
+    let bind_group_layout = unsafe {
+        device.create_bind_group_layout(&wgpu_hal::BindGroupLayoutDescriptor {
+            label: Some("contract storage bind group layout"),
+            flags: wgpu_hal::BindGroupLayoutFlags::empty(),
+            entries: &layout_entries,
+        })
+    }
+    .map_err(|e| format!("create storage bind group layout: {e:?}"))?;
+
+    let pipeline_layout = unsafe {
+        device.create_pipeline_layout(&wgpu_hal::PipelineLayoutDescriptor {
+            label: Some("contract storage pipeline layout"),
+            flags: wgpu_hal::PipelineLayoutFlags::empty(),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        })
+    }
+    .map_err(|e| format!("create storage pipeline layout: {e:?}"))?;
+
+    let buffer_binding = wgpu_hal::BufferBinding::new_unchecked(
+        &storage_buffer,
+        STORAGE_OFFSET,
+        wgt::BufferSize::new(STORAGE_BINDING_SIZE),
+    );
+    let bind_entries = [wgpu_hal::BindGroupEntry {
+        binding: 0,
+        resource_index: 0,
+        count: 1,
+    }];
+    let bind_group = unsafe {
+        device.create_bind_group(&wgpu_hal::BindGroupDescriptor {
+            label: Some("contract storage bind group"),
+            layout: &bind_group_layout,
+            buffers: &[buffer_binding],
+            samplers: &[],
+            textures: &[],
+            entries: &bind_entries,
+            acceleration_structures: &[],
+            external_textures: &[],
+        })
+    }
+    .map_err(|e| format!("create storage bind group: {e:?}"))?;
+
+    pipeline_layout
+        .validate_bind_group(0, &bind_group, &[], false)
+        .map_err(|e| format!("validate_bind_group(storage): {e}"))?;
+
+    let mut encoder = unsafe {
+        device.create_command_encoder(&wgpu_hal::CommandEncoderDescriptor {
+            label: Some("contract storage encoder"),
+            queue,
+        })
+    }
+    .map_err(|e| format!("create storage command encoder: {e:?}"))?;
+    unsafe { encoder.begin_encoding(Some("contract storage")) }
+        .map_err(|e| format!("begin_encoding(storage): {e:?}"))?;
+    unsafe { encoder.set_bind_group(&pipeline_layout, 0, &bind_group, &[]) };
+    unsafe { encoder.end_encoding() }.map_err(|e| format!("end_encoding(storage): {e:?}"))?;
+
+    unsafe {
+        device.destroy_bind_group(bind_group);
+        device.destroy_pipeline_layout(pipeline_layout);
+        device.destroy_bind_group_layout(bind_group_layout);
+        device.destroy_buffer(storage_buffer);
+    }
+
+    println!(
+        "  positive storage smoke: read-only layout, t0 binding, offset {STORAGE_OFFSET}, \
+         size {STORAGE_BINDING_SIZE} OK"
+    );
+    Ok(())
+}
+
 fn negative_tests(
     label: &str,
     device: &wgpu_hal::dx11::Device,
@@ -1138,23 +1294,46 @@ fn negative_tests(
     // 6. Arbitrary view formats are rejected.
     view_format_must_fail(label, device, failures);
 
-    // 7. Storage buffer bindings must be rejected by the layout.
-    let storage_buffer_entry = [wgt::BindGroupLayoutEntry {
+    // 7. Read-only storage buffers are implemented through raw SRVs; writable
+    // storage and dynamic storage offsets are still rejected by the layout.
+    // The positive read-only path is covered by `positive_storage_smoke`.
+    let read_write_storage_entry = [wgt::BindGroupLayoutEntry {
         binding: 0,
         visibility: wgt::ShaderStages::VERTEX_FRAGMENT,
         ty: wgt::BindingType::Buffer {
-            ty: wgt::BufferBindingType::Storage { read_only: true },
+            ty: wgt::BufferBindingType::Storage { read_only: false },
             has_dynamic_offset: false,
             min_binding_size: wgt::BufferSize::new(16),
         },
         count: None,
     }];
-    let description = format!("{label}: create_bind_group_layout(storage buffer)");
+    let description = format!("{label}: create_bind_group_layout(storage read-write)");
     let call = || unsafe {
         let result = device.create_bind_group_layout(&wgpu_hal::BindGroupLayoutDescriptor {
-            label: Some("contract storage buffer layout"),
+            label: Some("contract read-write storage buffer layout"),
             flags: wgpu_hal::BindGroupLayoutFlags::empty(),
-            entries: &storage_buffer_entry,
+            entries: &read_write_storage_entry,
+        });
+        result.map(|_| ())
+    };
+    expect_err(failures, &description, call);
+
+    let dynamic_storage_entry = [wgt::BindGroupLayoutEntry {
+        binding: 0,
+        visibility: wgt::ShaderStages::VERTEX_FRAGMENT,
+        ty: wgt::BindingType::Buffer {
+            ty: wgt::BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: true,
+            min_binding_size: wgt::BufferSize::new(16),
+        },
+        count: None,
+    }];
+    let description = format!("{label}: create_bind_group_layout(storage dynamic offset)");
+    let call = || unsafe {
+        let result = device.create_bind_group_layout(&wgpu_hal::BindGroupLayoutDescriptor {
+            label: Some("contract dynamic storage buffer layout"),
+            flags: wgpu_hal::BindGroupLayoutFlags::empty(),
+            entries: &dynamic_storage_entry,
         });
         result.map(|_| ())
     };

@@ -84,6 +84,7 @@ fn run() -> Result<(), String> {
 
     section_positive_static(&device, &queue, &limits)?;
     section_positive_dynamic(&device, &queue, &limits)?;
+    section_positive_storage(&device, &queue, &limits)?;
     section_negative_layouts(&device, &limits)?;
     section_negative_limits(&device, &limits)?;
     section_invalid_dynamic_offsets(&device, &queue, &limits)?;
@@ -376,6 +377,23 @@ fn create_uniform_group(
     .map_err(|e| format!("create_bind_group({label}): {e}"))
 }
 
+fn expect_bind_group_error(
+    device: &wgpu_hal::dx11::Device,
+    label: &str,
+    layout: &wgpu_hal::dx11::BindGroupLayout,
+    buffer: &wgpu_hal::dx11::Buffer,
+    offset: u64,
+    size: u64,
+) -> Result<(), String> {
+    match create_uniform_group(device, label, layout, buffer, offset, size) {
+        Ok(_) => Err(format!("{label}: create_bind_group unexpectedly succeeded")),
+        Err(error) => {
+            println!("  rejected as expected: {label} ({error})");
+            Ok(())
+        }
+    }
+}
+
 fn create_encoder(
     device: &wgpu_hal::dx11::Device,
     queue: &wgpu_hal::dx11::Queue,
@@ -590,6 +608,115 @@ fn section_positive_dynamic(
     Ok(())
 }
 
+fn section_positive_storage(
+    device: &wgpu_hal::dx11::Device,
+    queue: &wgpu_hal::dx11::Queue,
+    limits: &wgt::Limits,
+) -> Result<(), String> {
+    println!("\n=== 2b. read-only storage buffer ===");
+
+    if limits.max_storage_buffers_per_shader_stage == 0 {
+        println!("adapter does not advertise storage buffers at this feature level; skipping");
+        return Ok(());
+    }
+
+    let entries = [wgt::BindGroupLayoutEntry {
+        binding: 0,
+        visibility: wgt::ShaderStages::VERTEX_FRAGMENT,
+        ty: wgt::BindingType::Buffer {
+            ty: wgt::BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: wgt::BufferSize::new(16),
+        },
+        count: None,
+    }];
+    let bind_group_layout = create_layout(device, "storage descriptors", &entries)?;
+    let pipeline_layout = create_pipeline(device, "storage descriptors", &[&bind_group_layout], 0)?;
+
+    let target = pipeline_layout
+        .bind_target(0, 0)
+        .ok_or_else(|| "storage binding has no flattened register".to_owned())?;
+    if target.space != 0 || target.register != 0 {
+        return Err(format!(
+            "storage binding mapped to space {} register {}, expected t0",
+            target.space, target.register
+        ));
+    }
+    if target.binding_array_size.is_some() || target.restrict_indexing {
+        return Err("storage binding is marked as a binding array".to_owned());
+    }
+
+    // `wgpu-core` maps `BufferUsages::STORAGE` to both storage bits, so this
+    // is the usage shape the backend sees from a real `wgpu` storage buffer.
+    let buffer = create_buffer(
+        device,
+        "storage buffer",
+        512,
+        wgt::BufferUses::STORAGE_READ_ONLY
+            | wgt::BufferUses::STORAGE_READ_WRITE
+            | wgt::BufferUses::COPY_DST,
+    )?;
+
+    // The helper is type-agnostic: it creates a group with one buffer binding
+    // at the requested offset/size.
+    let offset_group = create_uniform_group(
+        device,
+        "storage group offset 256",
+        &bind_group_layout,
+        &buffer,
+        256,
+        16,
+    )?;
+    let base_group = create_uniform_group(
+        device,
+        "storage group offset 0",
+        &bind_group_layout,
+        &buffer,
+        0,
+        64,
+    )?;
+
+    pipeline_layout
+        .validate_bind_group(0, &offset_group, &[], true)
+        .map_err(|e| format!("validate_bind_group(storage offset 256): {e}"))?;
+    pipeline_layout
+        .validate_bind_group(0, &base_group, &[], true)
+        .map_err(|e| format!("validate_bind_group(storage offset 0): {e}"))?;
+
+    let mut encoder = create_encoder(device, queue, "storage descriptors")?;
+    unsafe {
+        encoder.set_bind_group(&pipeline_layout, 0, &offset_group, &[]);
+        encoder.set_bind_group(&pipeline_layout, 0, &base_group, &[]);
+    }
+    unsafe { encoder.end_encoding() }
+        .map_err(|e| format!("end_encoding(storage descriptors): {e}"))?;
+    println!("storage descriptors: t0 assigned; offset 256/size 16 and offset 0/size 64 accepted");
+
+    // The same layout must reject a buffer that was not created with STORAGE
+    // usage: creating the raw SRV would otherwise be impossible at bind time.
+    let non_storage_buffer =
+        create_buffer(device, "non-storage buffer", 64, wgt::BufferUses::COPY_DST)?;
+    expect_bind_group_error(
+        device,
+        "storage group with a non-storage buffer",
+        &bind_group_layout,
+        &non_storage_buffer,
+        0,
+        64,
+    )?;
+
+    unsafe {
+        device.destroy_bind_group(base_group);
+        device.destroy_bind_group(offset_group);
+        device.destroy_buffer(non_storage_buffer);
+        device.destroy_buffer(buffer);
+        device.destroy_pipeline_layout(pipeline_layout);
+        device.destroy_bind_group_layout(bind_group_layout);
+    }
+    println!("storage descriptors: negative bind group rejected");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Negative layout features
 // ---------------------------------------------------------------------------
@@ -600,15 +727,40 @@ fn section_negative_layouts(
 ) -> Result<(), String> {
     println!("\n=== 3. unsupported binding types and dimensions ===");
 
-    expect_layout_error(
-        device,
-        "storage buffer read-only",
-        &[storage_buffer_entry(0, true)],
-    )?;
+    let count_two = NonZeroU32::new(2).unwrap();
+
     expect_layout_error(
         device,
         "storage buffer read-write",
         &[storage_buffer_entry(0, false)],
+    )?;
+    expect_layout_error(
+        device,
+        "storage buffer read-only with dynamic offset",
+        &[wgt::BindGroupLayoutEntry {
+            ty: wgt::BindingType::Buffer {
+                ty: wgt::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: true,
+                min_binding_size: None,
+            },
+            ..storage_buffer_entry(0, true)
+        }],
+    )?;
+    expect_layout_error(
+        device,
+        "storage buffer binding array",
+        &[wgt::BindGroupLayoutEntry {
+            count: Some(count_two),
+            ..storage_buffer_entry(0, true)
+        }],
+    )?;
+    expect_layout_error(
+        device,
+        "storage buffer visible to compute",
+        &[wgt::BindGroupLayoutEntry {
+            visibility: wgt::ShaderStages::COMPUTE,
+            ..storage_buffer_entry(0, true)
+        }],
     )?;
 
     expect_layout_error(
@@ -682,7 +834,6 @@ fn section_negative_layouts(
         )?;
     }
 
-    let count_two = NonZeroU32::new(2).unwrap();
     expect_layout_error(
         device,
         "uniform buffer binding array",

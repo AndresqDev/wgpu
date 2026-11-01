@@ -44,6 +44,11 @@ fn map_buffer_bind_flags(usage: wgt::BufferUses) -> u32 {
     if usage.contains(wgt::BufferUses::UNIFORM) {
         bind_flags |= Direct3D11::D3D11_BIND_CONSTANT_BUFFER.0 as u32;
     }
+    if usage.intersects(wgt::BufferUses::STORAGE_READ_ONLY | wgt::BufferUses::STORAGE_READ_WRITE) {
+        // Read-only storage buffers are exposed to shaders as raw SRVs
+        // (`ByteAddressBuffer` in the generated HLSL).
+        bind_flags |= Direct3D11::D3D11_BIND_SHADER_RESOURCE.0 as u32;
+    }
     bind_flags
 }
 
@@ -527,13 +532,40 @@ impl crate::Device for Device {
     ) -> Result<Buffer, crate::DeviceError> {
         let usage = desc.usage;
 
-        // Storage buffers are not implemented: there is no UAV binding and no
-        // compute/writable-storage path. Rejecting here keeps the creation
-        // path from advertising a bind flag it can never honour.
-        if usage
-            .intersects(wgt::BufferUses::STORAGE_READ_ONLY | wgt::BufferUses::STORAGE_READ_WRITE)
-        {
-            return Err(unexpected("D3D11 storage buffers are not implemented yet"));
+        // Read-only storage buffers are implemented through raw SRVs, which is
+        // what Naga emits for `var<storage, read>`. Writable storage needs a
+        // UAV, and D3D11 has no compute/writable-storage path in this backend.
+        //
+        // `wgpu-core` maps `BufferUsages::STORAGE` to
+        // `STORAGE_READ_ONLY | STORAGE_READ_WRITE`, so the read-write bit can
+        // be present because of that mapping and must only be rejected when it
+        // appears on its own.
+        let storage = usage
+            .intersects(wgt::BufferUses::STORAGE_READ_ONLY | wgt::BufferUses::STORAGE_READ_WRITE);
+        if storage {
+            if usage.contains(wgt::BufferUses::STORAGE_READ_WRITE)
+                && !usage.contains(wgt::BufferUses::STORAGE_READ_ONLY)
+            {
+                return Err(unexpected(
+                    "D3D11 storage buffers support read-only SRV bindings only; read-write/UAV storage is not implemented",
+                ));
+            }
+            // A raw buffer SRV is created with the buffer staged as a shader
+            // resource. Mixing it with constant buffers, vertex/index data,
+            // indirect arguments or CPU-accessible staging usage would either
+            // be rejected by D3D11 or silently drop one of the bindings.
+            if usage.intersects(
+                wgt::BufferUses::MAP_READ
+                    | wgt::BufferUses::MAP_WRITE
+                    | wgt::BufferUses::VERTEX
+                    | wgt::BufferUses::INDEX
+                    | wgt::BufferUses::UNIFORM
+                    | wgt::BufferUses::INDIRECT,
+            ) {
+                return Err(unexpected(
+                    "D3D11 storage buffers cannot be combined with MAP_READ, MAP_WRITE, VERTEX, INDEX, UNIFORM or INDIRECT usage",
+                ));
+            }
         }
 
         // D3D11 cannot create a buffer that is both CPU accessible and an
@@ -620,6 +652,11 @@ impl crate::Device for Device {
         if usage.contains(wgt::BufferUses::INDIRECT) {
             misc_flags |= Direct3D11::D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS.0 as u32;
         }
+        if storage {
+            // Raw views need `StructureByteStride: 0`; the buffer is exposed
+            // as a flat stream of 32-bit elements to `ByteAddressBuffer`.
+            misc_flags |= Direct3D11::D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS.0 as u32;
+        }
 
         let buffer_desc = Direct3D11::D3D11_BUFFER_DESC {
             ByteWidth: byte_width as u32,
@@ -627,6 +664,9 @@ impl crate::Device for Device {
             BindFlags: bind_flags,
             CPUAccessFlags: cpu_access_flags,
             MiscFlags: misc_flags,
+            // Raw buffers (`ByteAddressBuffer`/`RWByteAddressBuffer`) are
+            // untyped: their stride must be zero, and the element size only
+            // exists in the SRV/UAV descriptor.
             StructureByteStride: 0,
         };
 
@@ -1323,7 +1363,7 @@ impl crate::Device for Device {
             Resource,
         >,
     ) -> Result<BindGroup, crate::DeviceError> {
-        BindGroup::new(desc)
+        BindGroup::new(&self.raw_device, desc)
     }
 
     unsafe fn destroy_bind_group(&self, group: BindGroup) {

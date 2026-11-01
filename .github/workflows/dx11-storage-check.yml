@@ -1,0 +1,81 @@
+name: DX11 storage check
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - dx11-storage-readonly
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  check-windows:
+    name: Windows DX11 read-only storage
+    runs-on: windows-2025
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check wgpu-hal with the DX11 backend
+        run: cargo check -p wgpu-hal --features dx11
+
+      - name: Run the DX11 storage test
+        shell: bash
+        # `pipefail` keeps the cargo exit code visible through `tee`.
+        run: |
+          set -o pipefail
+          cargo test -p wgpu-hal --features dx11 --test dx11_storage -- --nocapture 2>&1 | tee dx11-storage-test.log
+
+      - name: Run the DX11 contract test
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p wgpu-hal --features dx11 --test dx11_contract -- --nocapture 2>&1 | tee dx11-contract-test.log
+
+      - name: Run the DX11 descriptors test
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p wgpu-hal --features dx11 --test dx11_descriptors -- --nocapture 2>&1 | tee dx11-descriptors-test.log
+
+      - name: Run the DX11 resources test
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p wgpu-hal --features dx11 --test dx11_resources -- --nocapture 2>&1 | tee dx11-resources-test.log
+
+      - name: Run the wgpu-hal unit tests
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p wgpu-hal --features dx11 --lib 2>&1 | tee dx11-lib-test.log
+
+      - name: Check formatting
+        if: always()
+        run: cargo fmt --all -- --check
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dx11-storage-logs
+          path: |
+            dx11-storage-test.log
+            dx11-contract-test.log
+            dx11-descriptors-test.log
+            dx11-resources-test.log
+            dx11-lib-test.log
+          if-no-files-found: warn
