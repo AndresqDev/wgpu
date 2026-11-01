@@ -150,7 +150,10 @@ impl Surface {
             );
         }
 
-        log::trace!("presented the D3D11 swap chain (interval {})", swapchain.present_interval);
+        log::trace!(
+            "presented the D3D11 swap chain (interval {})",
+            swapchain.present_interval
+        );
         Ok(())
     }
 }

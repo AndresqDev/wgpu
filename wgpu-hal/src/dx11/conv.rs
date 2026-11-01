@@ -535,8 +535,14 @@ mod tests {
         assert_eq!(limits.max_storage_textures_per_shader_stage, 0);
         assert_eq!(limits.max_uniform_buffers_per_shader_stage, 12);
         assert_eq!(limits.max_binding_array_elements_per_shader_stage, 0);
-        assert_eq!(limits.max_binding_array_acceleration_structure_elements_per_shader_stage, 0);
-        assert_eq!(limits.max_binding_array_sampler_elements_per_shader_stage, 0);
+        assert_eq!(
+            limits.max_binding_array_acceleration_structure_elements_per_shader_stage,
+            0
+        );
+        assert_eq!(
+            limits.max_binding_array_sampler_elements_per_shader_stage,
+            0
+        );
         assert_eq!(limits.max_uniform_buffer_binding_size, 16384);
         assert_eq!(limits.max_storage_buffer_binding_size, 0);
         assert_eq!(limits.max_vertex_buffers, 8);
@@ -573,7 +579,10 @@ mod tests {
         assert_eq!(limits.max_blas_geometry_count, 0);
         assert_eq!(limits.max_tlas_instance_count, 0);
         assert_eq!(limits.max_acceleration_structures_per_shader_stage, 0);
-        assert_eq!(limits.max_buffers_and_acceleration_structures_per_shader_stage, 12);
+        assert_eq!(
+            limits.max_buffers_and_acceleration_structures_per_shader_stage,
+            12
+        );
         assert_eq!(limits.max_multiview_view_count, 0);
         assert_eq!(limits.max_ray_dispatch_count, 0);
         assert_eq!(limits.max_ray_recursion_depth, 0);

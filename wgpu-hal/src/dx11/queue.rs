@@ -69,7 +69,10 @@ impl fmt::Debug for Queue {
                 &self.last_submitted.load(Ordering::Relaxed),
             )
             .field("has_event_query", &self.event_query.is_some())
-            .field("marker_pending", &self.marker_pending.load(Ordering::Relaxed))
+            .field(
+                "marker_pending",
+                &self.marker_pending.load(Ordering::Relaxed),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -316,12 +319,8 @@ impl crate::Queue for Queue {
         // this call. The marker is kept armed until `GetData` observes it, so
         // a timeout never allows the query to be silently re-armed.
         if self.marker_pending.swap(false, Ordering::AcqRel) {
-            let retired = wait_for_query(
-                &self.context,
-                &self.device,
-                query,
-                Some(GPU_WAIT_TIMEOUT),
-            );
+            let retired =
+                wait_for_query(&self.context, &self.device, query, Some(GPU_WAIT_TIMEOUT));
             match retired {
                 Ok(true) => {}
                 Ok(false) => {
