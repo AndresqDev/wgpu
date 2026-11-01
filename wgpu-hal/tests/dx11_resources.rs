@@ -168,7 +168,7 @@ fn section_buffers(device: &wgpu_hal::dx11::Device) -> Result<(), String> {
     println!("\n=== 1. buffer creation ===");
     const SIZE: u64 = 64;
 
-    let cases: [(&str, wgt::BufferUses); 8] = [
+    let cases: [(&str, wgt::BufferUses); 10] = [
         (
             "vertex + COPY_DST",
             wgt::BufferUses::VERTEX | wgt::BufferUses::COPY_DST,
@@ -201,6 +201,16 @@ fn section_buffers(device: &wgpu_hal::dx11::Device) -> Result<(), String> {
             "dynamic MAP_WRITE + VERTEX",
             wgt::BufferUses::MAP_WRITE | wgt::BufferUses::VERTEX,
         ),
+        (
+            "storage read-only + COPY_DST",
+            wgt::BufferUses::STORAGE_READ_ONLY | wgt::BufferUses::COPY_DST,
+        ),
+        (
+            "storage read-only + storage read-write + COPY_DST",
+            wgt::BufferUses::STORAGE_READ_ONLY
+                | wgt::BufferUses::STORAGE_READ_WRITE
+                | wgt::BufferUses::COPY_DST,
+        ),
     ];
 
     let mut buffers = Vec::with_capacity(cases.len());
@@ -222,16 +232,31 @@ fn section_buffers(device: &wgpu_hal::dx11::Device) -> Result<(), String> {
         buffers.push(buffer);
     }
 
-    let negatives: [(&str, u64, wgt::BufferUses); 7] = [
-        (
-            "storage read-only",
-            SIZE,
-            wgt::BufferUses::STORAGE_READ_ONLY | wgt::BufferUses::COPY_DST,
-        ),
+    let negatives: [(&str, u64, wgt::BufferUses); 10] = [
         (
             "storage read-write",
             SIZE,
-            wgt::BufferUses::STORAGE_READ_WRITE | wgt::BufferUses::COPY_SRC,
+            wgt::BufferUses::STORAGE_READ_WRITE,
+        ),
+        (
+            "storage read-only + MAP_WRITE",
+            SIZE,
+            wgt::BufferUses::STORAGE_READ_ONLY | wgt::BufferUses::MAP_WRITE,
+        ),
+        (
+            "storage read-only + VERTEX",
+            SIZE,
+            wgt::BufferUses::STORAGE_READ_ONLY | wgt::BufferUses::VERTEX,
+        ),
+        (
+            "storage read-only + UNIFORM",
+            SIZE,
+            wgt::BufferUses::STORAGE_READ_ONLY | wgt::BufferUses::UNIFORM,
+        ),
+        (
+            "storage read-only + INDIRECT",
+            SIZE,
+            wgt::BufferUses::STORAGE_READ_ONLY | wgt::BufferUses::INDIRECT,
         ),
         (
             "MAP_READ + VERTEX",

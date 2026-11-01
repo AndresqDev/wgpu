@@ -45,18 +45,26 @@ provides compilable stubs for the rest of the `wgpu-hal` API.
   [`Device::create_bind_group`](crate::Device::create_bind_group) create CPU-side
   bind group objects. Registers are flattened into separate `b`/`t`/`u`/`s`
   counters in the pipeline layout; [`CommandEncoder::set_bind_group`](crate::CommandEncoder::set_bind_group)
-  binds their uniform buffers, textures and samplers.
+  binds their uniform buffers, read-only storage buffers (as raw buffer SRVs),
+  textures and samplers.
 - [`Device::create_shader_module`](crate::Device::create_shader_module) stores
   Naga IR or HLSL source. [`compile_shader`] translates Naga IR to HLSL with
   direct sampler registers and compiles it with FXC for Shader Model 5.0. The
   `raw-dx11-shader` example exercises this path.
+- Read-only storage buffers are implemented at feature level 11_0: Naga emits
+  `ByteAddressBuffer` for `var<storage, read>`, which the backend binds through
+  a raw buffer SRV in the shared `t` register space. The binding offset is
+  baked into the SRV, so static offsets work while dynamic storage offsets and
+  read-write/UAV storage do not. Storage textures and compute dispatches remain
+  unimplemented.
 - [`Device::create_render_pipeline`](crate::Device::create_render_pipeline)
   creates the vertex/pixel shader objects, input layout, rasterizer state,
   depth-stencil state and blend state. The `raw-dx11-triangle` example draws one
   triangle offscreen and verifies the result by readback.
 - Compute pipelines, dispatches, queries, push constants and deferred command
-  lists are still stubs. There is no MSAA, multiview, mesh-shader or
-  storage-buffer binding yet. Non-zero uniform buffer offsets require
+  lists are still stubs. There is no MSAA, multiview, mesh-shader, compute,
+  UAV/read-write storage, storage-texture or dynamic-storage-offset support.
+  Non-zero uniform buffer offsets require
   `ID3D11DeviceContext1` and must describe 256-byte-aligned constant-buffer
   windows; otherwise the binding is rejected with an explicit error log.
   Vertex input layouts use Naga's `LOC<location>` semantics.

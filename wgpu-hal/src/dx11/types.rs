@@ -22,6 +22,7 @@ const D3D11_SAMPLER_SLOTS: u32 = Direct3D11::D3D11_COMMONSHADER_SAMPLER_SLOT_COU
 #[derive(Clone, Copy, Debug, Default)]
 struct StageBindingCounts {
     uniform_buffers: u32,
+    storage_buffers: u32,
     sampled_textures: u32,
     samplers: u32,
 }
@@ -38,6 +39,14 @@ fn validate_stage_counts(
             "D3D11 {context} requests {} uniform buffers in the {stage} stage, at most {} are supported",
             counts.uniform_buffers,
             limits.max_uniform_buffers_per_shader_stage
+        );
+        return Err(crate::DeviceError::Unexpected);
+    }
+    if counts.storage_buffers > limits.max_storage_buffers_per_shader_stage {
+        log::error!(
+            "D3D11 {context} requests {} storage buffers in the {stage} stage, at most {} are supported",
+            counts.storage_buffers,
+            limits.max_storage_buffers_per_shader_stage
         );
         return Err(crate::DeviceError::Unexpected);
     }
@@ -413,26 +422,40 @@ impl BindGroupLayout {
             }
 
             match entry.ty {
-                // No storage binding may be accepted and then silently dropped.
-                // D3D11 without compute/writable-storage support has no way to
-                // bind storage buffers or storage textures.
+                // Read-only storage buffers are bound through a raw SRV, which
+                // is what Naga emits for `var<storage, read>`. Writable storage
+                // and dynamic storage offsets have no D3D11 mapping here, and
+                // no storage binding may be accepted and then silently dropped.
                 wgt::BindingType::Buffer {
-                    ty: wgt::BufferBindingType::Storage { .. },
+                    ty: wgt::BufferBindingType::Storage { read_only },
                     has_dynamic_offset,
-                    ..
+                    min_binding_size,
                 } => {
+                    if !read_only {
+                        log::error!(
+                            "D3D11 storage buffers support read-only SRV bindings only; read-write/UAV storage is not implemented (binding {})",
+                            entry.binding
+                        );
+                        return Err(crate::DeviceError::Unexpected);
+                    }
                     if has_dynamic_offset {
                         log::error!(
                             "D3D11 does not support dynamic storage buffer offsets (binding {})",
                             entry.binding
                         );
-                    } else {
-                        log::error!(
-                            "D3D11 does not support storage buffers (binding {})",
-                            entry.binding
-                        );
+                        return Err(crate::DeviceError::Unexpected);
                     }
-                    return Err(crate::DeviceError::Unexpected);
+                    if let Some(min_binding_size) = min_binding_size {
+                        if min_binding_size.get() > limits.max_storage_buffer_binding_size {
+                            log::error!(
+                                "D3D11 storage binding {} requires {} bytes, more than the advertised maximum of {}",
+                                entry.binding,
+                                min_binding_size.get(),
+                                limits.max_storage_buffer_binding_size
+                            );
+                            return Err(crate::DeviceError::Unexpected);
+                        }
+                    }
                 }
                 wgt::BindingType::StorageTexture { .. } => {
                     log::error!(
@@ -497,6 +520,17 @@ impl BindGroupLayout {
                     }
                     if entry.visibility.contains(wgt::ShaderStages::FRAGMENT) {
                         fragment_counts.uniform_buffers += 1;
+                    }
+                }
+                wgt::BindingType::Buffer {
+                    ty: wgt::BufferBindingType::Storage { .. },
+                    ..
+                } => {
+                    if entry.visibility.contains(wgt::ShaderStages::VERTEX) {
+                        vertex_counts.storage_buffers += 1;
+                    }
+                    if entry.visibility.contains(wgt::ShaderStages::FRAGMENT) {
+                        fragment_counts.storage_buffers += 1;
                     }
                 }
                 wgt::BindingType::Texture { .. } => {
@@ -683,14 +717,36 @@ impl PipelineLayout {
                         register
                     }
                     wgt::BindingType::Buffer {
-                        ty: wgt::BufferBindingType::Storage { .. },
+                        ty: wgt::BufferBindingType::Storage { read_only },
+                        has_dynamic_offset,
                         ..
                     } => {
-                        log::error!(
-                            "D3D11 does not support storage buffers in a pipeline layout (group {group}, binding {})",
-                            entry.binding
-                        );
-                        return Err(crate::DeviceError::Unexpected);
+                        if !read_only {
+                            log::error!(
+                                "D3D11 storage buffers support read-only SRV bindings only; read-write/UAV storage is not implemented in a pipeline layout (group {group}, binding {})",
+                                entry.binding
+                            );
+                            return Err(crate::DeviceError::Unexpected);
+                        }
+                        if has_dynamic_offset {
+                            log::error!(
+                                "D3D11 does not support dynamic storage buffer offsets in a pipeline layout (group {group}, binding {})",
+                                entry.binding
+                            );
+                            return Err(crate::DeviceError::Unexpected);
+                        }
+                        // `var<storage, read>` becomes a `ByteAddressBuffer`
+                        // bound to the same `t` register space as textures.
+                        if next_t >= D3D11_SRV_SLOTS {
+                            log::error!(
+                                "D3D11 pipeline layout needs shader resource register t{next_t}, but only {D3D11_SRV_SLOTS} slots exist per stage (group {group}, binding {})",
+                                entry.binding
+                            );
+                            return Err(crate::DeviceError::Unexpected);
+                        }
+                        let register = next_t;
+                        next_t += 1;
+                        register
                     }
                     wgt::BindingType::StorageTexture { .. } => {
                         log::error!(
@@ -719,6 +775,17 @@ impl PipelineLayout {
                         }
                         if entry.visibility.contains(wgt::ShaderStages::FRAGMENT) {
                             fragment_counts.uniform_buffers += 1;
+                        }
+                    }
+                    wgt::BindingType::Buffer {
+                        ty: wgt::BufferBindingType::Storage { .. },
+                        ..
+                    } => {
+                        if entry.visibility.contains(wgt::ShaderStages::VERTEX) {
+                            vertex_counts.storage_buffers += 1;
+                        }
+                        if entry.visibility.contains(wgt::ShaderStages::FRAGMENT) {
+                            fragment_counts.storage_buffers += 1;
                         }
                     }
                     wgt::BindingType::Texture { .. } => {
@@ -1015,6 +1082,120 @@ impl PipelineLayout {
                         }
                     }
                 }
+                wgt::BindingType::Buffer {
+                    ty: wgt::BufferBindingType::Storage { read_only },
+                    has_dynamic_offset,
+                    min_binding_size,
+                } => {
+                    if !read_only {
+                        return Err(format!(
+                            "bind group {index} binding {} is a read-write/UAV storage buffer, which is not implemented",
+                            entry.binding
+                        ));
+                    }
+                    if has_dynamic_offset {
+                        return Err(format!(
+                            "bind group {index} binding {} uses dynamic storage buffer offsets, which are not supported",
+                            entry.binding
+                        ));
+                    }
+
+                    let buffer = group
+                        .buffers()
+                        .iter()
+                        .find(|buffer| buffer.binding == entry.binding)
+                        .ok_or_else(|| {
+                            format!(
+                                "bind group {index} binding {} is missing its storage buffer",
+                                entry.binding
+                            )
+                        })?;
+                    if buffer.dynamic_offset {
+                        return Err(format!(
+                            "bind group {index} binding {} dynamic-offset state does not match the layout",
+                            entry.binding
+                        ));
+                    }
+                    if buffer.srv.is_none() {
+                        return Err(format!(
+                            "bind group {index} binding {} has no storage shader resource view",
+                            entry.binding
+                        ));
+                    }
+
+                    let target = self.bind_target(index, entry.binding).ok_or_else(|| {
+                        format!(
+                            "bind group {index} binding {} has no flattened register",
+                            entry.binding
+                        )
+                    })?;
+                    if target.space != 0 {
+                        return Err(format!(
+                            "bind group {index} binding {} maps to register space {}, expected 0",
+                            entry.binding, target.space
+                        ));
+                    }
+                    if target.register >= D3D11_SRV_SLOTS {
+                        return Err(format!(
+                            "bind group {index} binding {} maps to t{}, outside the {} shader resource slots",
+                            entry.binding, target.register, D3D11_SRV_SLOTS
+                        ));
+                    }
+
+                    let buffer_size = buffer.buffer.size();
+                    let offset = buffer.offset;
+                    if offset > buffer_size {
+                        return Err(format!(
+                            "bind group {index} binding {} offset {offset} is outside the buffer of {buffer_size} bytes",
+                            entry.binding
+                        ));
+                    }
+                    let size = buffer
+                        .size
+                        .unwrap_or_else(|| buffer_size.saturating_sub(offset));
+                    if size == 0 || offset % 4 != 0 || size % 4 != 0 {
+                        return Err(format!(
+                            "bind group {index} binding {} range {offset}..{} must have a non-zero 4-byte aligned offset and size for a raw SRV",
+                            entry.binding,
+                            offset.saturating_add(size)
+                        ));
+                    }
+                    let alignment =
+                        u64::from(self.limits.min_storage_buffer_offset_alignment.max(1));
+                    if offset % alignment != 0 {
+                        return Err(format!(
+                            "bind group {index} binding {} offset {offset} is not aligned to min_storage_buffer_offset_alignment {alignment}",
+                            entry.binding
+                        ));
+                    }
+                    if size > self.limits.max_storage_buffer_binding_size {
+                        return Err(format!(
+                            "bind group {index} binding {} size {size} exceeds max_storage_buffer_binding_size {}",
+                            entry.binding, self.limits.max_storage_buffer_binding_size
+                        ));
+                    }
+                    if let Some(min_binding_size) = min_binding_size {
+                        if size < min_binding_size.get() {
+                            return Err(format!(
+                                "bind group {index} binding {} size {size} is smaller than min_binding_size {}",
+                                entry.binding,
+                                min_binding_size.get()
+                            ));
+                        }
+                    }
+                    let end = offset.checked_add(size).ok_or_else(|| {
+                        format!(
+                            "bind group {index} binding {} range overflowed",
+                            entry.binding
+                        )
+                    })?;
+                    if end > buffer_size {
+                        return Err(format!(
+                            "bind group {index} binding {} range {offset}..{end} is outside the buffer of {buffer_size} bytes",
+                            entry.binding
+                        ));
+                    }
+                }
                 wgt::BindingType::Texture { .. } => {
                     let texture = group
                         .textures()
@@ -1204,6 +1385,55 @@ impl RenderPipeline {
     }
 }
 
+/// Creates the raw SRV used to expose a read-only storage buffer.
+///
+/// Naga translates `var<storage, read>` to HLSL `ByteAddressBuffer`, which
+/// D3D11 binds through a buffer-ex SRV with the raw flag. The descriptor is
+/// expressed in 4-byte elements, so `offset` and `size` must already be
+/// multiples of four (validated by the callers).
+fn create_storage_srv(
+    device: &Direct3D11::ID3D11Device,
+    buffer: &Direct3D11::ID3D11Buffer,
+    offset: u64,
+    size: u64,
+) -> Result<Direct3D11::ID3D11ShaderResourceView, crate::DeviceError> {
+    let first_element = u32::try_from(offset / 4).map_err(|_| {
+        log::error!("D3D11 raw buffer SRV offset {offset} does not fit in u32 elements");
+        crate::DeviceError::Unexpected
+    })?;
+    let num_elements = u32::try_from(size / 4).map_err(|_| {
+        log::error!("D3D11 raw buffer SRV size {size} does not fit in u32 elements");
+        crate::DeviceError::Unexpected
+    })?;
+
+    let desc = Direct3D11::D3D11_SHADER_RESOURCE_VIEW_DESC {
+        Format: Dxgi::Common::DXGI_FORMAT_R32_TYPELESS,
+        ViewDimension: Direct3D::D3D_SRV_DIMENSION_BUFFEREX,
+        Anonymous: Direct3D11::D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
+            BufferEx: Direct3D11::D3D11_BUFFEREX_SRV {
+                FirstElement: first_element,
+                NumElements: num_elements,
+                Flags: Direct3D11::D3D11_BUFFEREX_SRV_FLAG_RAW.0 as u32,
+            },
+        },
+    };
+
+    let mut raw: Option<Direct3D11::ID3D11ShaderResourceView> = None;
+    unsafe { device.CreateShaderResourceView(buffer, Some(&desc), Some(&mut raw)) }.map_err(
+        |e| {
+            log::error!(
+                "ID3D11Device::CreateShaderResourceView failed for a raw storage buffer: {e}"
+            );
+            crate::DeviceError::Unexpected
+        },
+    )?;
+
+    raw.ok_or_else(|| {
+        log::error!("CreateShaderResourceView returned no shader resource view");
+        crate::DeviceError::Unexpected
+    })
+}
+
 #[derive(Debug)]
 pub struct BoundBuffer {
     pub binding: u32,
@@ -1211,6 +1441,9 @@ pub struct BoundBuffer {
     pub offset: u64,
     pub size: Option<u64>,
     pub dynamic_offset: bool,
+    /// Raw SRV created for a read-only storage buffer. Uniform buffers keep
+    /// `None` and are bound as constant buffers instead.
+    pub srv: Option<Direct3D11::ID3D11ShaderResourceView>,
 }
 
 #[derive(Debug)]
@@ -1242,6 +1475,7 @@ pub struct BindGroup {
 
 impl BindGroup {
     pub(crate) fn new(
+        device: &Direct3D11::ID3D11Device,
         desc: &crate::BindGroupDescriptor<
             '_,
             BindGroupLayout,
@@ -1281,18 +1515,10 @@ impl BindGroup {
 
             match layout.ty {
                 wgt::BindingType::Buffer {
-                    ty,
+                    ty: wgt::BufferBindingType::Uniform,
                     has_dynamic_offset,
                     min_binding_size,
                 } => {
-                    if ty != wgt::BufferBindingType::Uniform {
-                        log::error!(
-                            "D3D11 storage buffer bindings are not implemented yet (binding {})",
-                            layout.binding
-                        );
-                        return Err(crate::DeviceError::Unexpected);
-                    }
-
                     let bindings = desc
                         .buffers
                         .get(start..end)
@@ -1366,8 +1592,123 @@ impl BindGroup {
                             // explicit range.
                             size: Some(size),
                             dynamic_offset: has_dynamic_offset,
+                            srv: None,
                         });
                     }
+                }
+                wgt::BindingType::Buffer {
+                    ty: wgt::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset,
+                    min_binding_size,
+                } => {
+                    // `BindGroupLayout::new` already rejects dynamic storage
+                    // offsets; keep the check here as well so a hand-built
+                    // layout cannot slip through.
+                    if has_dynamic_offset {
+                        log::error!(
+                            "D3D11 does not support dynamic storage buffer offsets (binding {})",
+                            layout.binding
+                        );
+                        return Err(crate::DeviceError::Unexpected);
+                    }
+
+                    let bindings = desc
+                        .buffers
+                        .get(start..end)
+                        .ok_or(crate::DeviceError::Unexpected)?;
+                    for binding in bindings {
+                        // `wgpu-core` maps `BufferUsages::STORAGE` to both
+                        // storage use bits, so either one witnesses a storage
+                        // buffer.
+                        if !binding.buffer.usage().intersects(
+                            wgt::BufferUses::STORAGE_READ_ONLY
+                                | wgt::BufferUses::STORAGE_READ_WRITE,
+                        ) {
+                            log::error!(
+                                "D3D11 storage buffer binding {} requires STORAGE usage",
+                                layout.binding
+                            );
+                            return Err(crate::DeviceError::Unexpected);
+                        }
+
+                        let buffer_size = binding.buffer.size();
+                        if binding.offset > buffer_size {
+                            log::error!(
+                                "D3D11 storage buffer binding offset is outside the buffer"
+                            );
+                            return Err(crate::DeviceError::Unexpected);
+                        }
+                        let size = binding
+                            .size
+                            .map_or(buffer_size - binding.offset, |size| size.get());
+                        if size == 0 {
+                            log::error!("D3D11 storage buffer binding size must be non-zero");
+                            return Err(crate::DeviceError::Unexpected);
+                        }
+                        let end = binding
+                            .offset
+                            .checked_add(size)
+                            .ok_or(crate::DeviceError::Unexpected)?;
+                        if end > buffer_size {
+                            log::error!("D3D11 storage buffer binding range is outside the buffer");
+                            return Err(crate::DeviceError::Unexpected);
+                        }
+
+                        // A raw SRV addresses 4-byte elements, so both the
+                        // offset and the size must be multiples of four.
+                        if binding.offset % 4 != 0 || size % 4 != 0 {
+                            log::error!(
+                                "D3D11 storage buffer bindings must have a 4-byte aligned offset and size for a raw SRV"
+                            );
+                            return Err(crate::DeviceError::Unexpected);
+                        }
+                        let alignment =
+                            u64::from(limits.min_storage_buffer_offset_alignment.max(1));
+                        if binding.offset % alignment != 0 {
+                            log::error!(
+                                "D3D11 storage buffer base offset {} is not aligned to {alignment}",
+                                binding.offset
+                            );
+                            return Err(crate::DeviceError::Unexpected);
+                        }
+                        if size > limits.max_storage_buffer_binding_size {
+                            log::error!(
+                                "D3D11 storage buffer binding size {size} exceeds max_storage_buffer_binding_size {}",
+                                limits.max_storage_buffer_binding_size
+                            );
+                            return Err(crate::DeviceError::Unexpected);
+                        }
+                        if let Some(min_binding_size) = min_binding_size {
+                            if size < min_binding_size.get() {
+                                log::error!(
+                                    "D3D11 storage buffer binding size {size} is smaller than min_binding_size {}",
+                                    min_binding_size.get()
+                                );
+                                return Err(crate::DeviceError::Unexpected);
+                            }
+                        }
+
+                        let srv =
+                            create_storage_srv(device, binding.buffer.raw(), binding.offset, size)?;
+                        buffers.push(BoundBuffer {
+                            binding: layout.binding,
+                            buffer: binding.buffer.clone_for_binding(),
+                            offset: binding.offset,
+                            size: Some(size),
+                            dynamic_offset: false,
+                            srv: Some(srv),
+                        });
+                    }
+                }
+                wgt::BindingType::Buffer {
+                    ty: wgt::BufferBindingType::Storage { read_only: false },
+                    ..
+                } => {
+                    log::error!(
+                        "D3D11 read-write/UAV storage buffers are not implemented (binding {})",
+                        layout.binding
+                    );
+                    return Err(crate::DeviceError::Unexpected);
                 }
                 wgt::BindingType::Sampler(_) => {
                     let bindings = desc
@@ -1539,6 +1880,24 @@ mod tests {
         }
     }
 
+    fn storage_buffer_entry(
+        binding: u32,
+        visibility: wgt::ShaderStages,
+        read_only: bool,
+        has_dynamic_offset: bool,
+    ) -> wgt::BindGroupLayoutEntry {
+        wgt::BindGroupLayoutEntry {
+            binding,
+            visibility,
+            ty: wgt::BindingType::Buffer {
+                ty: wgt::BufferBindingType::Storage { read_only },
+                has_dynamic_offset,
+                min_binding_size: None,
+            },
+            count: None,
+        }
+    }
+
     #[test]
     fn pipeline_layout_rejects_immediates_and_accepts_none() {
         let limits = test_limits();
@@ -1616,5 +1975,145 @@ mod tests {
             .map(|binding| sampler_entry(binding, wgt::ShaderStages::VERTEX))
             .collect();
         assert!(BindGroupLayout::new(&nine_samplers, &limits).is_err());
+    }
+
+    #[test]
+    fn bind_group_layout_accepts_read_only_storage_buffers() {
+        let limits = test_limits();
+
+        for visibility in [
+            wgt::ShaderStages::VERTEX,
+            wgt::ShaderStages::FRAGMENT,
+            wgt::ShaderStages::VERTEX_FRAGMENT,
+        ] {
+            let entries = [storage_buffer_entry(0, visibility, true, false)];
+            assert!(
+                BindGroupLayout::new(&entries, &limits).is_ok(),
+                "read-only storage buffers must be accepted for {visibility:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bind_group_layout_rejects_read_write_storage_buffers() {
+        let limits = test_limits();
+
+        let entries = [storage_buffer_entry(
+            0,
+            wgt::ShaderStages::FRAGMENT,
+            false,
+            false,
+        )];
+        assert!(
+            BindGroupLayout::new(&entries, &limits).is_err(),
+            "read-write/UAV storage buffers must be rejected"
+        );
+    }
+
+    #[test]
+    fn bind_group_layout_rejects_dynamic_storage_buffer_offsets() {
+        let limits = test_limits();
+
+        let entries = [storage_buffer_entry(
+            0,
+            wgt::ShaderStages::VERTEX,
+            true,
+            true,
+        )];
+        assert!(
+            BindGroupLayout::new(&entries, &limits).is_err(),
+            "dynamic storage buffer offsets must be rejected"
+        );
+    }
+
+    #[test]
+    fn bind_group_layout_enforces_storage_buffer_limit() {
+        let limits = test_limits();
+        assert_eq!(limits.max_storage_buffers_per_shader_stage, 4);
+
+        let four: Vec<_> = (0..4)
+            .map(|binding| storage_buffer_entry(binding, wgt::ShaderStages::FRAGMENT, true, false))
+            .collect();
+        assert!(BindGroupLayout::new(&four, &limits).is_ok());
+
+        let five: Vec<_> = (0..5)
+            .map(|binding| storage_buffer_entry(binding, wgt::ShaderStages::FRAGMENT, true, false))
+            .collect();
+        assert!(BindGroupLayout::new(&five, &limits).is_err());
+    }
+
+    #[test]
+    fn pipeline_layout_shares_srv_registers_with_storage_buffers() {
+        let limits = test_limits();
+
+        let layout = BindGroupLayout::new(
+            &[
+                storage_buffer_entry(0, wgt::ShaderStages::VERTEX, true, false),
+                texture_entry(1, wgt::ShaderStages::FRAGMENT),
+            ],
+            &limits,
+        )
+        .expect("read-only storage buffers share the SRV register space with textures");
+        let pipeline = PipelineLayout::new(vec![Some(layout)], 0, limits, false)
+            .expect("a storage buffer must not require ID3D11DeviceContext1");
+
+        let storage = pipeline
+            .bind_target(0, 0)
+            .expect("the storage buffer must get a flattened register");
+        assert_eq!(storage.space, 0);
+        assert_eq!(storage.register, 0, "the storage buffer must map to t0");
+        assert!(storage.dynamic_storage_buffer_offsets_index.is_none());
+
+        let texture = pipeline
+            .bind_target(0, 1)
+            .expect("the texture must get a flattened register");
+        assert_eq!(texture.space, 0);
+        assert_eq!(texture.register, 1, "the texture must map to t1");
+    }
+
+    #[test]
+    fn pipeline_layout_rejects_unsupported_storage_buffers() {
+        let limits = test_limits();
+
+        // The bind group layouts reject these entries, so build the pipeline
+        // layouts by hand to exercise the defensive checks in
+        // `PipelineLayout::new`.
+        let read_write = BindGroupLayout {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgt::ShaderStages::FRAGMENT,
+                ty: wgt::BindingType::Buffer {
+                    ty: wgt::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: 1,
+            }],
+            dynamic_offsets: Vec::new(),
+            limits: limits.clone(),
+        };
+        assert!(
+            PipelineLayout::new(vec![Some(read_write)], 0, limits.clone(), false).is_err(),
+            "read-write/UAV storage buffers must be rejected by the pipeline layout"
+        );
+
+        let dynamic = BindGroupLayout {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgt::ShaderStages::FRAGMENT,
+                ty: wgt::BindingType::Buffer {
+                    ty: wgt::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: true,
+                    min_binding_size: None,
+                },
+                count: 1,
+            }],
+            dynamic_offsets: vec![0],
+            limits: limits.clone(),
+        };
+        assert!(
+            PipelineLayout::new(vec![Some(dynamic)], 0, limits, false).is_err(),
+            "dynamic storage buffer offsets must be rejected by the pipeline layout"
+        );
     }
 }

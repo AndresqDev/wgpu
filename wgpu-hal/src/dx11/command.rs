@@ -1173,160 +1173,225 @@ impl crate::CommandEncoder for CommandBuffer {
                 ));
                 return;
             };
-            let has_dynamic_offset = match entry.ty {
+            match entry.ty {
                 wgt::BindingType::Buffer {
                     ty: wgt::BufferBindingType::Uniform,
                     has_dynamic_offset,
                     ..
-                } => has_dynamic_offset,
+                } => {
+                    let Some(target) = layout.bind_target(index, bound.binding) else {
+                        self.encoder_error(format!(
+                            "pipeline layout has no register for group {index} binding {}",
+                            bound.binding
+                        ));
+                        return;
+                    };
+                    let slot = target.register;
+                    if slot >= Direct3D11::D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT {
+                        self.encoder_error(format!(
+                            "constant buffer register {slot} is outside the supported range"
+                        ));
+                        return;
+                    }
+
+                    let dynamic_offset = if has_dynamic_offset {
+                        let Some(position) = group_layout
+                            .dynamic_offsets()
+                            .iter()
+                            .position(|binding| *binding == bound.binding)
+                        else {
+                            self.encoder_error(format!(
+                                "dynamic binding {} has no dynamic offset slot",
+                                bound.binding
+                            ));
+                            return;
+                        };
+                        let Some(offset) = dynamic_offsets.get(position) else {
+                            self.encoder_error(format!(
+                                "dynamic binding {} is missing its dynamic offset",
+                                bound.binding
+                            ));
+                            return;
+                        };
+                        u64::from(*offset)
+                    } else {
+                        0
+                    };
+
+                    let Some(offset) = bound.offset.checked_add(dynamic_offset) else {
+                        self.encoder_error("uniform buffer offset overflowed".to_owned());
+                        return;
+                    };
+                    let size = bound
+                        .size
+                        .unwrap_or_else(|| bound.buffer.size().saturating_sub(bound.offset));
+                    let Some(end) = offset.checked_add(size) else {
+                        self.encoder_error("uniform buffer range overflowed".to_owned());
+                        return;
+                    };
+                    if size == 0 || end > bound.buffer.size() {
+                        self.encoder_error(format!(
+                            "uniform buffer range {offset}..{end} is outside the buffer of {} bytes",
+                            bound.buffer.size()
+                        ));
+                        return;
+                    }
+                    if offset % 16 != 0 || size % 16 != 0 {
+                        self.encoder_error(format!(
+                            "uniform buffer ranges must be 16-byte aligned, got offset {offset} and size {size}"
+                        ));
+                        return;
+                    }
+
+                    let buffers = [Some(bound.buffer.raw().clone())];
+                    if offset == 0 {
+                        if entry.visibility.contains(wgt::ShaderStages::VERTEX) {
+                            unsafe { self.context.VSSetConstantBuffers(slot, Some(&buffers)) };
+                        }
+                        if entry.visibility.contains(wgt::ShaderStages::FRAGMENT) {
+                            unsafe { self.context.PSSetConstantBuffers(slot, Some(&buffers)) };
+                        }
+                        continue;
+                    }
+
+                    let Some(context1) = self.context1.as_ref() else {
+                        self.encoder_error(format!(
+                            "constant buffer binding {} has offset {offset}, but ID3D11DeviceContext1 is unavailable",
+                            bound.binding
+                        ));
+                        return;
+                    };
+                    // D3D11.1 expresses constant buffer windows in 16-constant
+                    // (256-byte) units, so the total offset must be 256-byte aligned.
+                    // The window length is expressed in 16-byte constants, so the
+                    // binding size only has to be a multiple of 16, not 256.
+                    if offset % 256 != 0 {
+                        self.encoder_error(format!(
+                            "constant buffer total offset must be 256-byte aligned, got {offset}"
+                        ));
+                        return;
+                    }
+                    let first_constant = match u32::try_from(offset / 16) {
+                        Ok(value) => value,
+                        Err(_) => {
+                            self.encoder_error(format!(
+                                "constant buffer offset {offset} does not fit in u32"
+                            ));
+                            return;
+                        }
+                    };
+                    let num_constants = match u32::try_from(size / 16) {
+                        Ok(value) => value,
+                        Err(_) => {
+                            self.encoder_error(format!(
+                                "constant buffer size {size} does not fit in u32"
+                            ));
+                            return;
+                        }
+                    };
+                    let end_constant = first_constant.saturating_add(num_constants);
+                    if end_constant > 4096 {
+                        self.encoder_error(format!(
+                            "constant buffer window {first_constant}..{end_constant} exceeds 4096 constants"
+                        ));
+                        return;
+                    }
+
+                    let first_constants = [first_constant];
+                    let num_constants = [num_constants];
+                    if entry.visibility.contains(wgt::ShaderStages::VERTEX) {
+                        unsafe {
+                            context1.VSSetConstantBuffers1(
+                                slot,
+                                1,
+                                Some(buffers.as_ptr()),
+                                Some(first_constants.as_ptr()),
+                                Some(num_constants.as_ptr()),
+                            )
+                        };
+                    }
+                    if entry.visibility.contains(wgt::ShaderStages::FRAGMENT) {
+                        unsafe {
+                            context1.PSSetConstantBuffers1(
+                                slot,
+                                1,
+                                Some(buffers.as_ptr()),
+                                Some(first_constants.as_ptr()),
+                                Some(num_constants.as_ptr()),
+                            )
+                        };
+                    }
+                }
+                wgt::BindingType::Buffer {
+                    ty: wgt::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    ..
+                } => {
+                    if bound.dynamic_offset {
+                        self.encoder_error(format!(
+                            "storage buffer binding {} must not use a dynamic offset",
+                            bound.binding
+                        ));
+                        return;
+                    }
+                    let Some(target) = layout.bind_target(index, bound.binding) else {
+                        self.encoder_error(format!(
+                            "pipeline layout has no register for group {index} binding {}",
+                            bound.binding
+                        ));
+                        return;
+                    };
+                    let slot = target.register;
+                    if slot >= Direct3D11::D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT {
+                        self.encoder_error(format!(
+                            "shader resource register {slot} is outside the supported range"
+                        ));
+                        return;
+                    }
+                    let Some(srv) = bound.srv.as_ref() else {
+                        self.encoder_error(format!(
+                            "storage buffer binding {} has no shader resource view",
+                            bound.binding
+                        ));
+                        return;
+                    };
+                    // The binding offset is baked into the raw SRV, so there
+                    // is no dynamic offset to apply before binding it.
+                    let views = [Some(srv.clone())];
+                    if entry.visibility.contains(wgt::ShaderStages::VERTEX) {
+                        unsafe { self.context.VSSetShaderResources(slot, Some(&views)) };
+                    }
+                    if entry.visibility.contains(wgt::ShaderStages::FRAGMENT) {
+                        unsafe { self.context.PSSetShaderResources(slot, Some(&views)) };
+                    }
+                }
+                wgt::BindingType::Buffer {
+                    ty: wgt::BufferBindingType::Storage { read_only: false },
+                    ..
+                } => {
+                    self.encoder_error(format!(
+                        "binding {} is a read-write/UAV storage buffer, which is not implemented",
+                        bound.binding
+                    ));
+                    return;
+                }
+                wgt::BindingType::Buffer {
+                    ty: wgt::BufferBindingType::Storage { .. },
+                    ..
+                } => {
+                    self.encoder_error(format!(
+                        "binding {} uses dynamic storage buffer offsets, which are not supported",
+                        bound.binding
+                    ));
+                    return;
+                }
                 _ => {
                     self.encoder_error(format!(
-                        "binding {} is not a uniform buffer in the bind group layout",
+                        "binding {} is not a uniform or read-only storage buffer in the bind group layout",
                         bound.binding
                     ));
                     return;
                 }
-            };
-
-            let Some(target) = layout.bind_target(index, bound.binding) else {
-                self.encoder_error(format!(
-                    "pipeline layout has no register for group {index} binding {}",
-                    bound.binding
-                ));
-                return;
-            };
-            let slot = target.register;
-            if slot >= Direct3D11::D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT {
-                self.encoder_error(format!(
-                    "constant buffer register {slot} is outside the supported range"
-                ));
-                return;
-            }
-
-            let dynamic_offset = if has_dynamic_offset {
-                let Some(position) = group_layout
-                    .dynamic_offsets()
-                    .iter()
-                    .position(|binding| *binding == bound.binding)
-                else {
-                    self.encoder_error(format!(
-                        "dynamic binding {} has no dynamic offset slot",
-                        bound.binding
-                    ));
-                    return;
-                };
-                let Some(offset) = dynamic_offsets.get(position) else {
-                    self.encoder_error(format!(
-                        "dynamic binding {} is missing its dynamic offset",
-                        bound.binding
-                    ));
-                    return;
-                };
-                u64::from(*offset)
-            } else {
-                0
-            };
-
-            let Some(offset) = bound.offset.checked_add(dynamic_offset) else {
-                self.encoder_error("uniform buffer offset overflowed".to_owned());
-                return;
-            };
-            let size = bound
-                .size
-                .unwrap_or_else(|| bound.buffer.size().saturating_sub(bound.offset));
-            let Some(end) = offset.checked_add(size) else {
-                self.encoder_error("uniform buffer range overflowed".to_owned());
-                return;
-            };
-            if size == 0 || end > bound.buffer.size() {
-                self.encoder_error(format!(
-                    "uniform buffer range {offset}..{end} is outside the buffer of {} bytes",
-                    bound.buffer.size()
-                ));
-                return;
-            }
-            if offset % 16 != 0 || size % 16 != 0 {
-                self.encoder_error(format!(
-                    "uniform buffer ranges must be 16-byte aligned, got offset {offset} and size {size}"
-                ));
-                return;
-            }
-
-            let buffers = [Some(bound.buffer.raw().clone())];
-            if offset == 0 {
-                if entry.visibility.contains(wgt::ShaderStages::VERTEX) {
-                    unsafe { self.context.VSSetConstantBuffers(slot, Some(&buffers)) };
-                }
-                if entry.visibility.contains(wgt::ShaderStages::FRAGMENT) {
-                    unsafe { self.context.PSSetConstantBuffers(slot, Some(&buffers)) };
-                }
-                continue;
-            }
-
-            let Some(context1) = self.context1.as_ref() else {
-                self.encoder_error(format!(
-                    "constant buffer binding {} has offset {offset}, but ID3D11DeviceContext1 is unavailable",
-                    bound.binding
-                ));
-                return;
-            };
-            // D3D11.1 expresses constant buffer windows in 16-constant
-            // (256-byte) units, so the total offset must be 256-byte aligned.
-            // The window length is expressed in 16-byte constants, so the
-            // binding size only has to be a multiple of 16, not 256.
-            if offset % 256 != 0 {
-                self.encoder_error(format!(
-                    "constant buffer total offset must be 256-byte aligned, got {offset}"
-                ));
-                return;
-            }
-            let first_constant = match u32::try_from(offset / 16) {
-                Ok(value) => value,
-                Err(_) => {
-                    self.encoder_error(format!(
-                        "constant buffer offset {offset} does not fit in u32"
-                    ));
-                    return;
-                }
-            };
-            let num_constants = match u32::try_from(size / 16) {
-                Ok(value) => value,
-                Err(_) => {
-                    self.encoder_error(format!("constant buffer size {size} does not fit in u32"));
-                    return;
-                }
-            };
-            let end_constant = first_constant.saturating_add(num_constants);
-            if end_constant > 4096 {
-                self.encoder_error(format!(
-                    "constant buffer window {first_constant}..{end_constant} exceeds 4096 constants"
-                ));
-                return;
-            }
-
-            let first_constants = [first_constant];
-            let num_constants = [num_constants];
-            if entry.visibility.contains(wgt::ShaderStages::VERTEX) {
-                unsafe {
-                    context1.VSSetConstantBuffers1(
-                        slot,
-                        1,
-                        Some(buffers.as_ptr()),
-                        Some(first_constants.as_ptr()),
-                        Some(num_constants.as_ptr()),
-                    )
-                };
-            }
-            if entry.visibility.contains(wgt::ShaderStages::FRAGMENT) {
-                unsafe {
-                    context1.PSSetConstantBuffers1(
-                        slot,
-                        1,
-                        Some(buffers.as_ptr()),
-                        Some(first_constants.as_ptr()),
-                        Some(num_constants.as_ptr()),
-                    )
-                };
             }
         }
 
