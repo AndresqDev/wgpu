@@ -1,0 +1,254 @@
+Cinnabar DX11 hardware tests
+Fecha: dom. 01/11/2026 11:07:01.34
+Equipo: DESKTOP-F7UIBH7
+Usuario: eduardov2
+
+=== raw-dx11 === 
+Comando: raw-dx11.exe  
+found 2 D3D11 adapter(s):
+  - Intel(R) HD Graphics 4400 | feature level 11_0 | dedicated VRAM 112 MiB | shared 2048 MiB | IntegratedGpu
+  - Microsoft Basic Render Driver | feature level 11_0 | dedicated VRAM 0 MiB | shared 7642 MiB | Cpu
+opened D3D11 device on 'Intel(R) HD Graphics 4400' (Device { adapter: "Intel(R) HD Graphics 4400", feature_level: 45056, .. })
+EXITCODE=0 
+ 
+=== raw-dx11-resources === 
+Comando: raw-dx11-resources.exe  
+using D3D11 adapter 'Intel(R) HD Graphics 4400' (IntegratedGpu)
+opened D3D11 device
+created and mapped vertex buffer (48 bytes)
+created upload, copy and depth textures
+created RTV, SRV and DSV views
+created sampler
+uploaded 1024 bytes into a staging buffer
+submitted copies and waited for the device
+buffer copy round trip verified
+texture upload/copy/read-back verified
+destroyed all D3D11 resources
+raw-dx11-resources completed successfully
+EXITCODE=0 
+ 
+=== raw-dx11-triangle === 
+Comando: raw-dx11-triangle.exe  
+using D3D11 adapter 'Intel(R) HD Graphics 4400' (IntegratedGpu)
+opened D3D11 device
+created and filled vertex buffer (24 bytes)
+created and filled uniform buffer
+created offscreen texture with RTV and SRV
+created bind group and pipeline layout
+created render pipeline with topology D3D_PRIMITIVE_TOPOLOGY(4)
+submitted triangle draw and readback copy
+center pixel (BGRA): [0, 0, 255, 255]
+corner pixel (BGRA): [255, 0, 0, 255]
+verified red triangle and blue clear color by readback
+destroyed all D3D11 triangle resources
+raw-dx11-triangle completed successfully
+EXITCODE=0 
+ 
+=== raw-dx11-resize === 
+Comando: raw-dx11-resize.exe  
+using D3D11 adapter 'Intel(R) HD Graphics 4400' (IntegratedGpu)
+[ERROR wgpu_hal::dx11::surface] failed to get swap-chain buffer 1: La aplicación realizó una llamada no válida. Los parámetros de la llamada o el estado de algún objeto no eran correctos.
+    Habilite la capa de depuración D3D para conocer los detalles mediante mensajes de depuración. (0x887A0001)
+configured 320x240 Bgra8UnormSrgb surface
+acquired 320x240 back buffer (depth_or_array_layers = 1)
+cleared and presented a 320x240 frame
+first frame at 320x240 reached GPU idle
+[ERROR wgpu_hal::dx11::surface] failed to get swap-chain buffer 1: La aplicación realizó una llamada no válida. Los parámetros de la llamada o el estado de algún objeto no eran correctos.
+    Habilite la capa de depuración D3D para conocer los detalles mediante mensajes de depuración. (0x887A0001)
+reconfigured to 640x360 Bgra8UnormSrgb surface
+acquired 640x360 back buffer (depth_or_array_layers = 1)
+cleared and presented a 640x360 frame
+second frame at 640x360 reached GPU idle
+unconfigured the surface
+raw-dx11-resize completed successfully
+EXITCODE=0 
+ 
+=== raw-dx11-window === 
+Comando: raw-dx11-window.exe  
+using D3D11 adapter 'Intel(R) HD Graphics 4400' (IntegratedGpu)
+surface formats: [Bgra8UnormSrgb, Bgra8Unorm]; present modes: [Fifo, Immediate]
+[ERROR wgpu_hal::dx11::surface] failed to get swap-chain buffer 1: La aplicación realizó una llamada no válida. Los parámetros de la llamada o el estado de algún objeto no eran correctos.
+    Habilite la capa de depuración D3D para conocer los detalles mediante mensajes de depuración. (0x887A0001)
+configured 320x240 Bgra8UnormSrgb surface
+presented frame 1/16
+presented frame 2/16
+presented frame 3/16
+presented frame 4/16
+presented frame 5/16
+presented frame 6/16
+presented frame 7/16
+presented frame 8/16
+presented frame 9/16
+presented frame 10/16
+presented frame 11/16
+presented frame 12/16
+presented frame 13/16
+presented frame 14/16
+presented frame 15/16
+presented frame 16/16
+raw-dx11-window completed successfully
+EXITCODE=0 
+ 
+=== dx11_contract === 
+Comando: dx11_contract.exe --nocapture 
+
+running 1 test
+DX11 Gate 0 contract: enumerated 2 DXGI adapter(s)
+=== adapter[0] 'Intel(R) HD Graphics 4400' vendor=0x8086 device=0x041e ===
+  feature level: 11_0 (D3D_FEATURE_LEVEL(45056))
+  device type: IntegratedGpu
+  software/WARP: false
+  features: ["TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES", "DEPTH_CLIP_CONTROL"]
+  downlevel flags: ["BASE_VERTEX", "NON_POWER_OF_TWO_MIPMAPPED_TEXTURES", "CUBE_ARRAY_TEXTURES", "COMPARISON_SAMPLERS", "INDEPENDENT_BLEND", "FULL_DRAW_INDEX_UINT32", "DEPTH_BIAS_CLAMP"]
+  limits: max_texture_dimension_2d = 16384 (feature level 11_0); alignments are out of Gate 0 scope and only listed as follow-up
+  follow-up alignments: buffer_copy_offset=1 buffer_copy_pitch=1 uniform_bounds_check_alignment=1
+  format capability matrix (contract §6.1 allowlist):
+    R8Unorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    R8Snorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    R8Uint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    R8Sint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    Rg8Unorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    Rg8Snorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    Rg8Uint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    Rg8Sint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    Rgba8Unorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    Rgba8UnormSrgb => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    Rgba8Snorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    Rgba8Uint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    Rgba8Sint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    Bgra8Unorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    Bgra8UnormSrgb => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    R16Uint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    R16Sint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    R16Unorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    R16Snorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    R16Float => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    Rg16Uint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    Rg16Sint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    Rg16Float => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    Rgba16Float => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    Rgba16Unorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    Rgba16Snorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    Rgba16Uint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    Rgba16Sint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    R32Uint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    R32Sint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    R32Float => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    Rgba32Float => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    Rgba32Uint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    Rgba32Sint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    Rgb10a2Unorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    Rgb10a2Uint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    Rg11b10Ufloat => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    Depth16Unorm => TextureFormatCapabilities(SAMPLED | DEPTH_STENCIL_ATTACHMENT | COPY_SRC | COPY_DST)
+    Depth24Plus => TextureFormatCapabilities(SAMPLED | DEPTH_STENCIL_ATTACHMENT | COPY_SRC | COPY_DST)
+    Depth24PlusStencil8 => TextureFormatCapabilities(SAMPLED | DEPTH_STENCIL_ATTACHMENT | COPY_SRC | COPY_DST)
+    Depth32Float => TextureFormatCapabilities(SAMPLED | DEPTH_STENCIL_ATTACHMENT | COPY_SRC | COPY_DST)
+    Depth32FloatStencil8 => TextureFormatCapabilities(SAMPLED | DEPTH_STENCIL_ATTACHMENT | COPY_SRC | COPY_DST)
+  surface formats: [Bgra8UnormSrgb, Bgra8Unorm]
+  surface present modes: [Fifo, Immediate]
+  surface composite alpha modes: [Opaque]
+  surface maximum_frame_latency: 1..=2 (LIMITATION: Surface::configure does not enforce this range; it is recorded, not asserted)
+  positive smoke: render pipeline topology D3D_PRIMITIVE_TOPOLOGY(4)
+  positive smoke: buffers, texture, view, sampler, bind group, pipeline OK
+  ok: adapter[0] 'Intel(R) HD Graphics 4400' vendor=0x8086 device=0x041e: create_texture(Bc1RgbaUnorm) returned an explicit Err
+  ok: adapter[0] 'Intel(R) HD Graphics 4400' vendor=0x8086 device=0x041e: create_texture(Bc7RgbaUnormSrgb) returned an explicit Err
+  ok: adapter[0] 'Intel(R) HD Graphics 4400' vendor=0x8086 device=0x041e: create_texture(sample_count = 4) returned an explicit Err
+  ok: adapter[0] 'Intel(R) HD Graphics 4400' vendor=0x8086 device=0x041e: begin_render_pass(sample_count = 4) returned an explicit Err
+  ok: adapter[0] 'Intel(R) HD Graphics 4400' vendor=0x8086 device=0x041e: create_render_pipeline(multisample.count = 4) returned an explicit Err
+  ok: adapter[0] 'Intel(R) HD Graphics 4400' vendor=0x8086 device=0x041e: create_texture(TextureDimension::D1) returned an explicit Err
+  ok: adapter[0] 'Intel(R) HD Graphics 4400' vendor=0x8086 device=0x041e: create_texture(TextureDimension::D3) returned an explicit Err
+  ok: adapter[0] 'Intel(R) HD Graphics 4400' vendor=0x8086 device=0x041e: create_texture_view(format = Rgba8Uint) returned an explicit Err
+  ok: adapter[0] 'Intel(R) HD Graphics 4400' vendor=0x8086 device=0x041e: create_bind_group_layout(storage buffer) returned an explicit Err
+  ok: adapter[0] 'Intel(R) HD Graphics 4400' vendor=0x8086 device=0x041e: create_bind_group_layout(storage texture) returned an explicit Err
+  ok: adapter[0] 'Intel(R) HD Graphics 4400' vendor=0x8086 device=0x041e: create_pipeline_layout(immediate_size = 4) returned an explicit Err
+  ok: adapter[0] 'Intel(R) HD Graphics 4400' vendor=0x8086 device=0x041e: create_compute_pipeline returned an explicit Err
+  ok: adapter[0] 'Intel(R) HD Graphics 4400' vendor=0x8086 device=0x041e: create_query_set returned an explicit Err
+  ok: adapter[0] 'Intel(R) HD Graphics 4400' vendor=0x8086 device=0x041e: create_ray_tracing_pipeline returned an explicit Err
+  ok: adapter[0] 'Intel(R) HD Graphics 4400' vendor=0x8086 device=0x041e: create_acceleration_structure returned an explicit Err
+  note: command-encoder ray-tracing methods are silent no-ops on this pin; reachability is not asserted because the descriptor entry points must fail first
+  ok: adapter[0] 'Intel(R) HD Graphics 4400' vendor=0x8086 device=0x041e: surface.configure(format = Rgba8Unorm) returned an explicit Err
+  ok: adapter[0] 'Intel(R) HD Graphics 4400' vendor=0x8086 device=0x041e: surface.configure(present_mode = Mailbox) returned an explicit Err
+  note: both configure calls failed before touching the swap chain, so the surface is left unconfigured and no invalid configuration is retained
+=== adapter[1] 'Microsoft Basic Render Driver' vendor=0x1414 device=0x008c ===
+  feature level: 11_0 (D3D_FEATURE_LEVEL(45056))
+  device type: Cpu
+  software/WARP: true
+  features: ["TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES", "DEPTH_CLIP_CONTROL"]
+  downlevel flags: ["BASE_VERTEX", "NON_POWER_OF_TWO_MIPMAPPED_TEXTURES", "CUBE_ARRAY_TEXTURES", "COMPARISON_SAMPLERS", "INDEPENDENT_BLEND", "FULL_DRAW_INDEX_UINT32", "DEPTH_BIAS_CLAMP"]
+  limits: max_texture_dimension_2d = 16384 (feature level 11_0); alignments are out of Gate 0 scope and only listed as follow-up
+  follow-up alignments: buffer_copy_offset=1 buffer_copy_pitch=1 uniform_bounds_check_alignment=1
+  format capability matrix (contract §6.1 allowlist):
+    R8Unorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    R8Snorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    R8Uint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    R8Sint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    Rg8Unorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    Rg8Snorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    Rg8Uint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    Rg8Sint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    Rgba8Unorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    Rgba8UnormSrgb => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    Rgba8Snorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    Rgba8Uint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    Rgba8Sint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    Bgra8Unorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    Bgra8UnormSrgb => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    R16Uint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    R16Sint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    R16Unorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    R16Snorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    R16Float => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    Rg16Uint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    Rg16Sint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    Rg16Float => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    Rgba16Float => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    Rgba16Unorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    Rgba16Snorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    Rgba16Uint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    Rgba16Sint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    R32Uint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    R32Sint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    R32Float => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    Rgba32Float => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    Rgba32Uint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    Rgba32Sint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    Rgb10a2Unorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    Rgb10a2Uint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST)
+    Rg11b10Ufloat => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST)
+    Depth16Unorm => TextureFormatCapabilities(SAMPLED | DEPTH_STENCIL_ATTACHMENT | COPY_SRC | COPY_DST)
+    Depth24Plus => TextureFormatCapabilities(SAMPLED | DEPTH_STENCIL_ATTACHMENT | COPY_SRC | COPY_DST)
+    Depth24PlusStencil8 => TextureFormatCapabilities(SAMPLED | DEPTH_STENCIL_ATTACHMENT | COPY_SRC | COPY_DST)
+    Depth32Float => TextureFormatCapabilities(SAMPLED | DEPTH_STENCIL_ATTACHMENT | COPY_SRC | COPY_DST)
+    Depth32FloatStencil8 => TextureFormatCapabilities(SAMPLED | DEPTH_STENCIL_ATTACHMENT | COPY_SRC | COPY_DST)
+  surface formats: [Bgra8UnormSrgb, Bgra8Unorm]
+  surface present modes: [Fifo, Immediate]
+  surface composite alpha modes: [Opaque]
+  surface maximum_frame_latency: 1..=2 (LIMITATION: Surface::configure does not enforce this range; it is recorded, not asserted)
+  positive smoke: render pipeline topology D3D_PRIMITIVE_TOPOLOGY(4)
+  positive smoke: buffers, texture, view, sampler, bind group, pipeline OK
+  ok: adapter[1] 'Microsoft Basic Render Driver' vendor=0x1414 device=0x008c: create_texture(Bc1RgbaUnorm) returned an explicit Err
+  ok: adapter[1] 'Microsoft Basic Render Driver' vendor=0x1414 device=0x008c: create_texture(Bc7RgbaUnormSrgb) returned an explicit Err
+  ok: adapter[1] 'Microsoft Basic Render Driver' vendor=0x1414 device=0x008c: create_texture(sample_count = 4) returned an explicit Err
+  ok: adapter[1] 'Microsoft Basic Render Driver' vendor=0x1414 device=0x008c: begin_render_pass(sample_count = 4) returned an explicit Err
+  ok: adapter[1] 'Microsoft Basic Render Driver' vendor=0x1414 device=0x008c: create_render_pipeline(multisample.count = 4) returned an explicit Err
+  ok: adapter[1] 'Microsoft Basic Render Driver' vendor=0x1414 device=0x008c: create_texture(TextureDimension::D1) returned an explicit Err
+  ok: adapter[1] 'Microsoft Basic Render Driver' vendor=0x1414 device=0x008c: create_texture(TextureDimension::D3) returned an explicit Err
+  ok: adapter[1] 'Microsoft Basic Render Driver' vendor=0x1414 device=0x008c: create_texture_view(format = Rgba8Uint) returned an explicit Err
+  ok: adapter[1] 'Microsoft Basic Render Driver' vendor=0x1414 device=0x008c: create_bind_group_layout(storage buffer) returned an explicit Err
+  ok: adapter[1] 'Microsoft Basic Render Driver' vendor=0x1414 device=0x008c: create_bind_group_layout(storage texture) returned an explicit Err
+  ok: adapter[1] 'Microsoft Basic Render Driver' vendor=0x1414 device=0x008c: create_pipeline_layout(immediate_size = 4) returned an explicit Err
+  ok: adapter[1] 'Microsoft Basic Render Driver' vendor=0x1414 device=0x008c: create_compute_pipeline returned an explicit Err
+  ok: adapter[1] 'Microsoft Basic Render Driver' vendor=0x1414 device=0x008c: create_query_set returned an explicit Err
+  ok: adapter[1] 'Microsoft Basic Render Driver' vendor=0x1414 device=0x008c: create_ray_tracing_pipeline returned an explicit Err
+  ok: adapter[1] 'Microsoft Basic Render Driver' vendor=0x1414 device=0x008c: create_acceleration_structure returned an explicit Err
+  note: command-encoder ray-tracing methods are silent no-ops on this pin; reachability is not asserted because the descriptor entry points must fail first
+  ok: adapter[1] 'Microsoft Basic Render Driver' vendor=0x1414 device=0x008c: surface.configure(format = Rgba8Unorm) returned an explicit Err
+  ok: adapter[1] 'Microsoft Basic Render Driver' vendor=0x1414 device=0x008c: surface.configure(present_mode = Mailbox) returned an explicit Err
+  note: both configure calls failed before touching the swap chain, so the surface is left unconfigured and no invalid configuration is retained
+test dx11_gate0_contract ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+EXITCODE=0 
+ 
