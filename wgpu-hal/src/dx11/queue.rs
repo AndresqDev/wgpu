@@ -7,18 +7,19 @@
 //! ## Completion tracking
 //!
 //! The queue owns one `ID3D11Query` of type `D3D11_QUERY_EVENT` for
-//! [`crate::Queue::wait_for_idle`], and every [`super::Fence`] owns its own
-//! `D3D11_QUERY_EVENT` for [`crate::Device::wait`]. Submission ends the
-//! relevant query before flushing, which places a marker in the command
+//! [`crate::Queue::wait_for_idle`], and every [`super::Fence`] owns a pool of
+//! eight such queries for [`crate::Device::wait`]. Submission arms a free
+//! per-fence slot before flushing, which places a marker in the command
 //! stream; the wait entry points then poll `ID3D11DeviceContext::GetData` on
-//! that marker until the GPU has processed it. Both are real GPU-completion
-//! waits, not CPU-side approximations.
+//! the armed markers until the GPU has processed them. Both are real
+//! GPU-completion waits, not CPU-side approximations.
 //!
 //! D3D11 does not allow an event query to be re-armed while its previous
-//! marker is still in flight, so a query is retired (its marker observed, or
-//! the bounded queue timeout hit) before `EndQuery` is issued again. Fence
-//! values are only published as pending on submission; they become completed
-//! when the per-fence marker is observed, never earlier.
+//! marker is still in flight, so a fence slot is only reused once its marker
+//! has been observed, or is rotated to a fresh query when it remains in flight
+//! past the slot-rotation timeout. The queue's idle marker follows the same
+//! rule. Fence values are only published as pending on submission; they become
+//! completed when a marker that covers them is observed, never earlier.
 
 use core::{
     fmt,
@@ -44,7 +45,7 @@ use super::{debug::DebugLayer, Api, CommandBuffer, Fence, SurfaceTexture};
 const GPU_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How often the completion marker is polled while waiting.
-const GPU_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(1);
+pub(crate) const GPU_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 /// The D3D11 submission queue.
 pub struct Queue {
@@ -55,7 +56,7 @@ pub struct Queue {
     /// A single queue-owned query is enough for idleness because every marker
     /// covers all work recorded before it: the queue only needs to know that
     /// the GPU reached the most recent marker. Per-submission completion is
-    /// tracked by the query owned by [`super::Fence`].
+    /// tracked by the query pool owned by [`super::Fence`].
     event_query: Option<Direct3D11::ID3D11Query>,
     /// Whether `event_query` already holds a marker that has not been observed
     /// by a successful `GetData` yet.
@@ -147,7 +148,9 @@ impl Queue {
 }
 
 /// Creates the `D3D11_QUERY_EVENT` marker used for GPU-completion waits.
-fn create_event_query(device: &Direct3D11::ID3D11Device) -> Option<Direct3D11::ID3D11Query> {
+pub(crate) fn create_event_query(
+    device: &Direct3D11::ID3D11Device,
+) -> Option<Direct3D11::ID3D11Query> {
     let desc = Direct3D11::D3D11_QUERY_DESC {
         Query: Direct3D11::D3D11_QUERY_EVENT,
         MiscFlags: 0,
@@ -310,38 +313,12 @@ impl crate::Queue for Queue {
             return Ok(());
         }
 
-        // The same event query cannot be re-armed while a marker is still in
-        // flight, so retire the marker of the previous submission on this
-        // fence first. This observes real GPU work and only advances
-        // `completed_value` up to what the GPU has actually reached.
-        let pending = fence.pending();
-        if pending > fence.completed() {
-            let retired = wait_for_query(
-                &self.context,
-                &self.device,
-                fence.query(),
-                Some(GPU_WAIT_TIMEOUT),
-            )?;
-            if retired {
-                // Publish only the value this marker was armed for. A newer
-                // submission may have advanced `pending` meanwhile.
-                fence.note_completed(pending);
-            } else {
-                log::error!(
-                    "the previous submission on this D3D11 fence did not complete within \
-                     {GPU_WAIT_TIMEOUT:?}; refusing to re-arm its completion query"
-                );
-                self.report_debug_messages();
-                return Err(crate::DeviceError::Unexpected);
-            }
-        }
-
-        // Place the marker after everything recorded so far, then hand the
-        // command stream to the GPU. `submit` must not claim GPU completion:
-        // it only publishes the pending value, and `Device::wait` observes the
-        // marker before moving the completed value.
-        unsafe { self.context.End(fence.query()) };
-        fence.note_pending(fence_value);
+        // Arm a per-fence marker after everything recorded so far, then hand
+        // the command stream to the GPU. The fence reuses a free pool slot or
+        // rotates the oldest in-flight marker; it publishes the pending value
+        // before returning. `submit` must not claim GPU completion: only
+        // `Device::wait` observes a marker and moves the completed value.
+        fence.arm(&self.context, &self.device, fence_value)?;
         unsafe { self.context.Flush() };
 
         if let Some(error) = device_removed(&self.device) {
@@ -476,5 +453,75 @@ mod tests {
                 "{code:?} must not be classified as device loss"
             );
         }
+    }
+
+    /// Checks that `Fence::wait` honours a timeout when a value is pending but
+    /// no marker can be polled.
+    ///
+    /// `force_pending_for_test` publishes the value without arming a pool slot,
+    /// so the wait loop has no GPU marker to observe and must return
+    /// `Ok(false)` at the deadline. This exercises the same timeout branch that
+    /// a marker stuck behind a hung GPU would hit, without depending on WARP
+    /// speed or a real TDR.
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn fence_wait_times_out_when_no_marker_is_armed() {
+        use windows::Win32::{Foundation::HMODULE, Graphics::Direct3D};
+
+        let feature_levels = [Direct3D::D3D_FEATURE_LEVEL_11_0];
+        let mut device: Option<Direct3D11::ID3D11Device> = None;
+        let mut context: Option<Direct3D11::ID3D11DeviceContext> = None;
+
+        unsafe {
+            Direct3D11::D3D11CreateDevice(
+                None::<&Dxgi::IDXGIAdapter>,
+                Direct3D::D3D_DRIVER_TYPE_WARP,
+                HMODULE::default(),
+                Direct3D11::D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                Some(&feature_levels),
+                Direct3D11::D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut context),
+            )
+        }
+        .expect("D3D11CreateDevice(WARP) failed while setting up the fence-timeout test");
+
+        let device = device.expect("D3D11CreateDevice succeeded without returning a device");
+        let context = context.expect("D3D11CreateDevice succeeded without returning a context");
+        let fence = Fence::new(&device).expect("failed to create the fence for the timeout test");
+
+        fence.force_pending_for_test(1);
+
+        let start = std::time::Instant::now();
+        let reached = fence
+            .wait(&context, &device, 1, Some(Duration::from_millis(20)))
+            .expect("Fence::wait failed on the timeout test fence");
+        let elapsed = start.elapsed();
+
+        assert!(
+            !reached,
+            "Fence::wait reported completion although no marker was armed"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(20),
+            "Fence::wait returned before its 20 ms timeout ({elapsed:?})"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "Fence::wait blocked for {elapsed:?} although it had a 20 ms timeout"
+        );
+        assert_eq!(
+            fence.completed(),
+            0,
+            "a timeout must not advance the completed fence value"
+        );
+        assert_eq!(
+            fence
+                .get_completed_value(&context, &device)
+                .expect("get_completed_value failed on the timeout test fence"),
+            0,
+            "polling after a timeout must not invent a completed value"
+        );
     }
 }

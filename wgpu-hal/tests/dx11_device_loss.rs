@@ -8,8 +8,8 @@
 //! - the healthy-device classification (`GetDeviceRemovedReason` is `S_OK`);
 //! - the controlled `Fence::wait` paths, including values that were never
 //!   submitted and waits after several overlapping submissions;
-//! - repeated submissions on one fence (the backend retires the previous
-//!   `D3D11_QUERY_EVENT` marker before re-arming it);
+//! - repeated submissions on one fence (each submission arms a free slot of
+//!   the fence's `D3D11_QUERY_EVENT` pool instead of re-arming a marker);
 //! - the no-op behaviour of a lower-than-pending fence value;
 //! - dropping a fence whose markers were never observed, without a panic.
 //!
