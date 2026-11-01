@@ -509,10 +509,10 @@ fn check_limits(
     check_limit!(max_dynamic_uniform_buffers_per_pipeline_layout, 8);
     check_limit!(max_dynamic_storage_buffers_per_pipeline_layout, 0);
     check_limit!(max_sampled_textures_per_shader_stage, 16);
-    check_limit!(max_samplers_per_shader_stage, 16);
+    check_limit!(max_samplers_per_shader_stage, 8);
     check_limit!(max_storage_buffers_per_shader_stage, 0);
     check_limit!(max_storage_textures_per_shader_stage, 0);
-    check_limit!(max_uniform_buffers_per_shader_stage, 12);
+    check_limit!(max_uniform_buffers_per_shader_stage, 7);
     check_limit!(max_binding_array_elements_per_shader_stage, 0);
     check_limit!(
         max_binding_array_acceleration_structure_elements_per_shader_stage,

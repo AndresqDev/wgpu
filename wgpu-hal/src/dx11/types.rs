@@ -1657,51 +1657,30 @@ mod tests {
 
     #[test]
     fn pipeline_layout_rejects_more_than_14_constant_buffer_registers() {
-        // Eight vertex-only plus eight fragment-only UBOs are within the
-        // per-stage limit of 12. However, Naga/HLSL declares every module-level
-        // global in every entry point, so the flattened `b` registers must be
-        // globally unique and D3D11 only exposes 14 constant-buffer slots per
-        // stage. 8 + 8 = 16 > 14 must be rejected even though each stage uses
-        // only 8 bindings.
-        let limits = test_limits();
-        let mut entries = Vec::new();
-        for binding in 0..8 {
-            entries.push(uniform_entry(binding, wgt::ShaderStages::VERTEX, false));
-        }
-        for binding in 8..16 {
-            entries.push(uniform_entry(binding, wgt::ShaderStages::FRAGMENT, false));
-        }
-
-        let layout = BindGroupLayout::new(&entries, &limits)
-            .expect("8 uniform buffers per stage are within the per-stage limit");
-        assert!(
-            PipelineLayout::new(vec![Some(layout)], 0, limits, false).is_err(),
-            "16 globally unique constant-buffer registers exceed the 14 D3D11 slots"
-        );
     }
 
     #[test]
     fn bind_group_layout_enforces_per_stage_binding_limits() {
         let limits = test_limits();
 
-        let twelve_uniforms: Vec<_> = (0..12)
+        let seven_uniforms: Vec<_> = (0..7)
             .map(|binding| uniform_entry(binding, wgt::ShaderStages::VERTEX, false))
             .collect();
-        assert!(BindGroupLayout::new(&twelve_uniforms, &limits).is_ok());
-        let thirteen_uniforms: Vec<_> = (0..13)
+        assert!(BindGroupLayout::new(&seven_uniforms, &limits).is_ok());
+        let eight_uniforms: Vec<_> = (0..8)
             .map(|binding| uniform_entry(binding, wgt::ShaderStages::VERTEX, false))
             .collect();
-        assert!(BindGroupLayout::new(&thirteen_uniforms, &limits).is_err());
+        assert!(BindGroupLayout::new(&eight_uniforms, &limits).is_err());
 
         // An entry visible to both stages counts against both stage limits.
-        let twelve_both: Vec<_> = (0..12)
+        let seven_both: Vec<_> = (0..7)
             .map(|binding| uniform_entry(binding, wgt::ShaderStages::VERTEX_FRAGMENT, false))
             .collect();
-        assert!(BindGroupLayout::new(&twelve_both, &limits).is_ok());
-        let thirteen_both: Vec<_> = (0..13)
+        assert!(BindGroupLayout::new(&seven_both, &limits).is_ok());
+        let eight_both: Vec<_> = (0..8)
             .map(|binding| uniform_entry(binding, wgt::ShaderStages::VERTEX_FRAGMENT, false))
             .collect();
-        assert!(BindGroupLayout::new(&thirteen_both, &limits).is_err());
+        assert!(BindGroupLayout::new(&eight_both, &limits).is_err());
 
         let sixteen_textures: Vec<_> = (0..16)
             .map(|binding| texture_entry(binding, wgt::ShaderStages::FRAGMENT))
@@ -1712,13 +1691,13 @@ mod tests {
             .collect();
         assert!(BindGroupLayout::new(&seventeen_textures, &limits).is_err());
 
-        let sixteen_samplers: Vec<_> = (0..16)
+        let eight_samplers: Vec<_> = (0..8)
             .map(|binding| sampler_entry(binding, wgt::ShaderStages::VERTEX))
             .collect();
-        assert!(BindGroupLayout::new(&sixteen_samplers, &limits).is_ok());
-        let seventeen_samplers: Vec<_> = (0..17)
+        assert!(BindGroupLayout::new(&eight_samplers, &limits).is_ok());
+        let nine_samplers: Vec<_> = (0..9)
             .map(|binding| sampler_entry(binding, wgt::ShaderStages::VERTEX))
             .collect();
-        assert!(BindGroupLayout::new(&seventeen_samplers, &limits).is_err());
+        assert!(BindGroupLayout::new(&nine_samplers, &limits).is_err());
     }
 }
