@@ -236,6 +236,10 @@ name = "raw-dx11-window"
 required-features = ["dx11"]
 
 [[example]]
+name = "raw-dx11-resize"
+required-features = ["dx11"]
+
+[[example]]
 name = "raw-dx11-resources"
 required-features = ["dx11"]
 

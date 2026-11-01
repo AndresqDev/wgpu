@@ -18,7 +18,10 @@ provides compilable stubs for the rest of the `wgpu-hal` API.
   context.
 - [`Surface::configure`](crate::Surface::configure) creates a
   `DXGI_SWAP_EFFECT_FLIP_DISCARD` swap chain with two BGRA8 back buffers and a
-  render-target view for each buffer.
+  render-target view for each buffer. Reconfiguring (for example on a window
+  resize) releases the previous swap chain and its views before creating the
+  replacement chain; the `raw-dx11-resize` example verifies that the acquired
+  back-buffer extent follows the requested configuration.
 - [`CommandBuffer::begin_render_pass`](crate::CommandEncoder::begin_render_pass)
   binds real render-target and depth-stencil views with `OMSetRenderTargets` and
   applies the requested clears. Render pipelines and draw commands are executed
@@ -49,13 +52,25 @@ provides compilable stubs for the rest of the `wgpu-hal` API.
   `ID3D11DeviceContext1` and must describe 256-byte-aligned constant-buffer
   windows; otherwise the binding is rejected with an explicit error log.
   Vertex input layouts use Naga's `LOC<location>` semantics.
+- [`Queue::wait_for_idle`](crate::Queue::wait_for_idle) performs a real
+  GPU-completion wait: the queue owns an `ID3D11Query` of type
+  `D3D11_QUERY_EVENT`, [`Queue::submit`](crate::Queue::submit) ends it before
+  flushing, and `wait_for_idle` polls `ID3D11DeviceContext::GetData` on that
+  marker with a bounded five-second timeout. Device removal is reported as
+  `DeviceError::Lost` / `SurfaceError::Lost` from submit, present and the wait.
+- Fence values are still updated on the CPU by [`Queue::submit`](crate::Queue::submit),
+  so [`Device::wait`](crate::Device::wait) only proves that the work was
+  submitted, not that the GPU finished it. A per-fence `ID3D11_QUERY_EVENT`
+  inside [`Fence`] is the phase-2 follow-up; it requires `types.rs`/`device.rs`
+  changes that are intentionally out of scope for this delivery.
 
 ## Next steps
 
 The next milestone is compute pipelines and dispatches, followed by deferred
 contexts so command recording and submission can be separated. Current command
 encoding still executes immediately on the immediate context and
-[`Queue::submit`](crate::Queue::submit) only flushes it.
+[`Queue::submit`](crate::Queue::submit) only flushes it. After that, per-fence
+GPU completion replaces the CPU-side fence signalling described above.
 */
 
 #![allow(unused_variables)]

@@ -5,8 +5,13 @@
 //! buffers, so keeping a view for each buffer lets [`crate::Surface::acquire_texture`]
 //! hand out the buffer that DXGI is actually expecting next.
 //!
-//! Window resizing is not handled yet: [`crate::Surface::configure`] recreates
-//! the swap chain, but there is no automatic `ResizeBuffers` path.
+//! Reconfiguration (including a window resize) is handled by releasing the
+//! previous swap chain and creating a new one at the requested extent instead
+//! of calling `ResizeBuffers`: the HAL contract guarantees that no acquired
+//! textures are alive during [`crate::Surface::configure`], so no back-buffer
+//! reference can outlive the old chain. The `raw-dx11-resize` example exercises
+//! this path. `maximum_frame_latency` is accepted but not enforced here; DXGI
+//! uses its own frame-latency queue for flip-model chains.
 
 use alloc::vec::Vec;
 use core::{fmt, time::Duration};
@@ -63,6 +68,11 @@ struct SurfaceState {
 struct SwapChain {
     /// One view per back buffer. Dropped before the swap chain itself so that
     /// no back-buffer references survive when the swap chain is released.
+    ///
+    /// The field order below is load-bearing: `views` and `textures` must be
+    /// declared before `raw`, because Rust drops struct fields in declaration
+    /// order. [`SwapChain`] also implements `Drop` to clear both vectors
+    /// explicitly, so the invariant holds even if this order is changed.
     views: Vec<TextureView>,
     /// Identity wrappers for the back-buffer resources. They are handed out to
     /// `wgpu-core` through `SurfaceTexture`, which requires `Borrow<Texture>`.
@@ -72,6 +82,22 @@ struct SwapChain {
     /// later; without it the surface conservatively uses buffer 0.
     raw3: Option<Dxgi::IDXGISwapChain3>,
     present_interval: u32,
+}
+
+impl Drop for SwapChain {
+    fn drop(&mut self) {
+        // Release the per-buffer views and texture identities before the raw
+        // swap chain goes away. `Drop::drop` runs before the fields are
+        // dropped, so clearing here releases every back-buffer reference while
+        // DXGI still owns the chain; the raw interface itself is released
+        // afterwards in declaration order.
+        self.views.clear();
+        self.textures.clear();
+        log::trace!(
+            "releasing a D3D11 swap chain ({} present interval)",
+            self.present_interval
+        );
+    }
 }
 
 impl Surface {
@@ -113,6 +139,9 @@ impl Surface {
                 windows::core::Error::from_hresult(hr)
             );
             return Err(
+                // A removed or reset device invalidates the swap chain as a
+                // whole; report it as `Lost` so the caller can recreate the
+                // device and surface instead of retrying the present.
                 if hr == Dxgi::DXGI_ERROR_DEVICE_REMOVED || hr == Dxgi::DXGI_ERROR_DEVICE_RESET {
                     crate::SurfaceError::Lost
                 } else {
@@ -121,6 +150,7 @@ impl Surface {
             );
         }
 
+        log::trace!("presented the D3D11 swap chain (interval {})", swapchain.present_interval);
         Ok(())
     }
 }
@@ -283,8 +313,14 @@ impl crate::Surface for Surface {
 
         // The safety contract guarantees that no acquired textures are alive,
         // so the old swap chain (and its views) can be released first. This
-        // also covers reconfiguration and window resize.
+        // also covers reconfiguration and window resize. `SwapChain::drop`
+        // clears the render-target views and texture identities before the raw
+        // swap chain, so DXGI sees no outstanding back-buffer references when
+        // the replacement chain is created below.
         let old_swapchain = self.state.lock().swapchain.take();
+        if old_swapchain.is_some() {
+            log::debug!("releasing the previous D3D11 swap chain before reconfiguring");
+        }
         drop(old_swapchain);
 
         let mut desc = Dxgi::DXGI_SWAP_CHAIN_DESC1 {
@@ -357,8 +393,13 @@ impl crate::Surface for Surface {
     }
 
     unsafe fn unconfigure(&self, _device: &Device) {
-        let mut state = self.state.lock();
-        state.swapchain = None;
+        let swapchain = self.state.lock().swapchain.take();
+        if swapchain.is_some() {
+            log::debug!("unconfigured the D3D11 surface");
+        }
+        // Release the chain outside the state lock; `SwapChain::drop` releases
+        // the views before the raw swap chain.
+        drop(swapchain);
     }
 
     unsafe fn acquire_texture(
@@ -371,6 +412,20 @@ impl crate::Surface for Surface {
             .swapchain
             .as_ref()
             .ok_or(crate::SurfaceError::Other("surface is not configured"))?;
+
+        // A swap chain always has at least one buffer, but never index into it
+        // blind: an inconsistent chain must be an explicit error rather than a
+        // panic in the HAL.
+        if swapchain.views.is_empty() || swapchain.views.len() != swapchain.textures.len() {
+            log::error!(
+                "the D3D11 swap chain has {} views for {} textures",
+                swapchain.views.len(),
+                swapchain.textures.len()
+            );
+            return Err(crate::SurfaceError::Other(
+                "D3D11 swap chain has no usable back buffers",
+            ));
+        }
 
         let index = swapchain
             .raw3
