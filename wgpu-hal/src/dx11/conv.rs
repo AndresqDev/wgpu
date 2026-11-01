@@ -437,14 +437,19 @@ pub fn features_for_feature_level(_level: Direct3D::D3D_FEATURE_LEVEL) -> wgt::F
     wgt::Features::DEPTH_CLIP_CONTROL | wgt::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
 }
 
-/// Alignment requirements used by the stub device.
+/// Alignment requirements used by the device.
 ///
-/// These values are NOT part of the Gate 0 target table and remain unverified;
-/// they are an explicit follow-up item.
+/// D3D11 buffer copies are expressed as subresource boxes whose coordinates
+/// are byte offsets, and the backend requires them to be multiples of four
+/// bytes. Textures are uploaded/read back through staging buffers with a row
+/// pitch the backend repacks itself, but the public layout is still limited to
+/// 4-byte offsets and pitches instead of advertising an alignment the copies
+/// reject. `uniform_bounds_check_alignment` is left at 1: uniform bindings are
+/// checked against the 16-byte D3D11 requirement in `set_bind_group`.
 pub fn alignments() -> crate::Alignments {
     crate::Alignments {
-        buffer_copy_offset: wgt::BufferSize::MIN,
-        buffer_copy_pitch: wgt::BufferSize::MIN,
+        buffer_copy_offset: wgt::BufferSize::new(4).unwrap(),
+        buffer_copy_pitch: wgt::BufferSize::new(4).unwrap(),
         uniform_bounds_check_alignment: wgt::BufferSize::MIN,
         raw_tlas_instance_size: 0,
         ray_tracing_scratch_buffer_alignment: 1,

@@ -39,10 +39,6 @@ fn map_buffer_bind_flags(usage: wgt::BufferUses) -> u32 {
     if usage.contains(wgt::BufferUses::UNIFORM) {
         bind_flags |= Direct3D11::D3D11_BIND_CONSTANT_BUFFER.0 as u32;
     }
-    if usage.intersects(wgt::BufferUses::STORAGE_READ_ONLY | wgt::BufferUses::STORAGE_READ_WRITE) {
-        bind_flags |= Direct3D11::D3D11_BIND_SHADER_RESOURCE.0 as u32;
-        bind_flags |= Direct3D11::D3D11_BIND_UNORDERED_ACCESS.0 as u32;
-    }
     bind_flags
 }
 
@@ -58,14 +54,6 @@ fn map_texture_bind_flags(usage: wgt::TextureUses) -> u32 {
         .intersects(wgt::TextureUses::DEPTH_STENCIL_READ | wgt::TextureUses::DEPTH_STENCIL_WRITE)
     {
         bind_flags |= Direct3D11::D3D11_BIND_DEPTH_STENCIL.0 as u32;
-    }
-    if usage.intersects(
-        wgt::TextureUses::STORAGE_READ_ONLY
-            | wgt::TextureUses::STORAGE_WRITE_ONLY
-            | wgt::TextureUses::STORAGE_READ_WRITE
-            | wgt::TextureUses::STORAGE_ATOMIC,
-    ) {
-        bind_flags |= Direct3D11::D3D11_BIND_UNORDERED_ACCESS.0 as u32;
     }
     bind_flags
 }
@@ -467,6 +455,27 @@ impl crate::Device for Device {
         desc: &crate::BufferDescriptor,
     ) -> Result<Buffer, crate::DeviceError> {
         let usage = desc.usage;
+
+        // Storage buffers are not implemented: there is no UAV binding and no
+        // compute/writable-storage path. Rejecting here keeps the creation
+        // path from advertising a bind flag it can never honour.
+        if usage
+            .intersects(wgt::BufferUses::STORAGE_READ_ONLY | wgt::BufferUses::STORAGE_READ_WRITE)
+        {
+            return Err(unexpected("D3D11 storage buffers are not implemented yet"));
+        }
+
+        // D3D11 cannot create a buffer that is both CPU accessible and an
+        // indirect-arguments buffer: `D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS`
+        // is only valid on non-staging, non-dynamic resources.
+        if usage.contains(wgt::BufferUses::INDIRECT)
+            && usage.intersects(wgt::BufferUses::MAP_READ | wgt::BufferUses::MAP_WRITE)
+        {
+            return Err(unexpected(
+                "D3D11 indirect buffers cannot be mapped on the CPU",
+            ));
+        }
+
         let bind_flags = map_buffer_bind_flags(usage);
 
         // D3D11 requires a constant buffer to be separate from resources that
@@ -539,11 +548,6 @@ impl crate::Device for Device {
         let mut misc_flags = 0u32;
         if usage.contains(wgt::BufferUses::INDIRECT) {
             misc_flags |= Direct3D11::D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS.0 as u32;
-        }
-        if usage
-            .intersects(wgt::BufferUses::STORAGE_READ_ONLY | wgt::BufferUses::STORAGE_READ_WRITE)
-        {
-            misc_flags |= Direct3D11::D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS.0 as u32;
         }
 
         let buffer_desc = Direct3D11::D3D11_BUFFER_DESC {
@@ -686,6 +690,16 @@ impl crate::Device for Device {
                 "D3D11 texture creation currently supports sample_count == 1 only",
             ));
         }
+        if desc.usage.intersects(
+            wgt::TextureUses::STORAGE_READ_ONLY
+                | wgt::TextureUses::STORAGE_WRITE_ONLY
+                | wgt::TextureUses::STORAGE_READ_WRITE
+                | wgt::TextureUses::STORAGE_ATOMIC,
+        ) {
+            return Err(unexpected(
+                "D3D11 storage textures/UAVs are not implemented yet",
+            ));
+        }
         if desc.size.width == 0 || desc.size.height == 0 {
             return Err(unexpected("D3D11 texture dimensions must be non-zero"));
         }
@@ -696,6 +710,27 @@ impl crate::Device for Device {
             return Err(unexpected(
                 "D3D11 texture array layer count must be non-zero",
             ));
+        }
+
+        // A 2D texture can only have mip levels down to 1x1, so the chain is
+        // bounded by the largest dimension. D3D11 would reject the extra
+        // levels, but reporting the reason here is clearer.
+        let max_dimension = desc.size.width.max(desc.size.height);
+        let max_mip_levels = u32::BITS - max_dimension.leading_zeros();
+        if desc.mip_level_count > max_mip_levels {
+            return Err(unexpected(
+                "D3D11 texture mip level count exceeds the size of the mip chain",
+            ));
+        }
+
+        for view_format in &desc.view_formats {
+            if !texture_formats_compatible(desc.format, *view_format) {
+                let message = alloc::format!(
+                    "D3D11 texture view format {view_format:?} is not compatible with {:?}",
+                    desc.format
+                );
+                return Err(unexpected(&message));
+            }
         }
 
         let format = super::conv::map_texture_format(desc.format)
@@ -733,7 +768,15 @@ impl crate::Device for Device {
             Usage: d3d_usage,
             BindFlags: bind_flags,
             CPUAccessFlags: cpu_access_flags,
-            MiscFlags: 0,
+            // The cube misc flag is what lets `create_texture_view` build a
+            // `TEXTURECUBE`/`TEXTURECUBEARRAY` SRV from this resource. Staging
+            // textures cannot have bind flags or a cube view, and D3D11 rejects
+            // resource misc flags on them.
+            MiscFlags: if desc.is_cube_compatible() && !staging {
+                Direct3D11::D3D11_RESOURCE_MISC_TEXTURECUBE.0 as u32
+            } else {
+                0
+            },
         };
 
         // `TextureDescriptor` does not expose initial texture data in this
@@ -793,6 +836,31 @@ impl crate::Device for Device {
     ) -> Result<TextureView, crate::DeviceError> {
         use Direct3D11 as d3d;
 
+        if matches!(
+            desc.dimension,
+            wgt::TextureViewDimension::D1 | wgt::TextureViewDimension::D3
+        ) {
+            return Err(unexpected("D3D11 texture views support 2D dimensions only"));
+        }
+
+        let is_cube = matches!(
+            desc.dimension,
+            wgt::TextureViewDimension::Cube | wgt::TextureViewDimension::CubeArray
+        );
+        // D3D11 has no cube render target or cube depth-stencil views, so a
+        // cube resource can only be exposed to shaders through a cube SRV.
+        if is_cube
+            && desc.usage.intersects(
+                wgt::TextureUses::COLOR_TARGET
+                    | wgt::TextureUses::DEPTH_STENCIL_READ
+                    | wgt::TextureUses::DEPTH_STENCIL_WRITE,
+            )
+        {
+            return Err(unexpected(
+                "D3D11 does not support cube color targets or cube depth-stencil views",
+            ));
+        }
+
         if !texture_formats_compatible(texture.format(), desc.format) {
             return Err(unexpected(
                 "D3D11 texture views must use a compatible format; arbitrary view formats are not supported",
@@ -837,13 +905,48 @@ impl crate::Device for Device {
             ));
         }
 
+        match desc.dimension {
+            // A plain 2D view is a single layer. Multi-layer views must ask for
+            // `D2Array` explicitly.
+            wgt::TextureViewDimension::D2 if layer_count != 1 => {
+                return Err(unexpected(
+                    "D3D11 2D texture views must cover exactly one array layer",
+                ));
+            }
+            wgt::TextureViewDimension::Cube => {
+                if texture.extent().width != texture.extent().height {
+                    return Err(unexpected("D3D11 cube views require a square 2D texture"));
+                }
+                if base_layer != 0 || layer_count != 6 {
+                    return Err(unexpected(
+                        "D3D11 cube views require exactly six layers starting at layer zero",
+                    ));
+                }
+            }
+            wgt::TextureViewDimension::CubeArray => {
+                if texture.extent().width != texture.extent().height {
+                    return Err(unexpected(
+                        "D3D11 cube-array views require a square 2D texture",
+                    ));
+                }
+                if !base_layer.is_multiple_of(6) || !layer_count.is_multiple_of(6) {
+                    return Err(unexpected(
+                        "D3D11 cube-array views require six-layer aligned ranges",
+                    ));
+                }
+            }
+            _ => {}
+        }
+
         let is_array = texture.array_layer_count() > 1 || layer_count > 1;
         let mut srv = None;
         let mut rtv = None;
         let mut dsv = None;
 
         if desc.usage.contains(wgt::TextureUses::RESOURCE) {
-            let format = super::conv::map_srv_format(texture.format(), desc.range.aspect)
+            // Use the view format so that sRGB views of a linear texture (and
+            // vice versa) sample with the requested encoding.
+            let format = super::conv::map_srv_format(desc.format, desc.range.aspect)
                 .ok_or_else(|| unexpected("D3D11 SRV format is not supported"))?;
 
             let mut raw_desc = d3d::D3D11_SHADER_RESOURCE_VIEW_DESC::default();
@@ -866,11 +969,6 @@ impl crate::Device for Device {
                     };
                 }
                 wgt::TextureViewDimension::Cube => {
-                    if base_layer != 0 || !layer_count.is_multiple_of(6) {
-                        return Err(unexpected(
-                            "D3D11 cube SRVs need six layers starting at layer zero",
-                        ));
-                    }
                     raw_desc.ViewDimension = Direct3D::D3D_SRV_DIMENSION_TEXTURECUBE;
                     raw_desc.Anonymous.TextureCube = d3d::D3D11_TEXCUBE_SRV {
                         MostDetailedMip: base_mip,
@@ -878,11 +976,6 @@ impl crate::Device for Device {
                     };
                 }
                 wgt::TextureViewDimension::CubeArray => {
-                    if !layer_count.is_multiple_of(6) {
-                        return Err(unexpected(
-                            "D3D11 cube-array SRVs need a multiple of six layers",
-                        ));
-                    }
                     raw_desc.ViewDimension = Direct3D::D3D_SRV_DIMENSION_TEXTURECUBEARRAY;
                     raw_desc.Anonymous.TextureCubeArray = d3d::D3D11_TEXCUBE_ARRAY_SRV {
                         MostDetailedMip: base_mip,
@@ -913,7 +1006,9 @@ impl crate::Device for Device {
             srv = raw;
         }
 
-        if desc.usage.contains(wgt::TextureUses::COLOR_TARGET) {
+        // Cube and cube-array views only ever create an SRV; the descriptor
+        // checks above already rejected target usages for them.
+        if !is_cube && desc.usage.contains(wgt::TextureUses::COLOR_TARGET) {
             if !texture.format().has_color_aspect() {
                 return Err(unexpected(
                     "cannot create a color render target for a depth/stencil texture",
@@ -951,20 +1046,33 @@ impl crate::Device for Device {
             rtv = raw;
         }
 
-        if desc.usage.intersects(
-            wgt::TextureUses::DEPTH_STENCIL_READ | wgt::TextureUses::DEPTH_STENCIL_WRITE,
-        ) {
+        if !is_cube
+            && desc.usage.intersects(
+                wgt::TextureUses::DEPTH_STENCIL_READ | wgt::TextureUses::DEPTH_STENCIL_WRITE,
+            )
+        {
             if !texture.format().has_depth_aspect() && !texture.format().has_stencil_aspect() {
                 return Err(unexpected(
                     "cannot create a depth-stencil view for a color texture",
                 ));
             }
-            let format = super::conv::map_dsv_format(texture.format(), desc.range.aspect)
+            let format = super::conv::map_dsv_format(desc.format, desc.range.aspect)
                 .ok_or_else(|| unexpected("D3D11 DSV format is not supported"))?;
 
             let mut raw_desc = d3d::D3D11_DEPTH_STENCIL_VIEW_DESC::default();
             raw_desc.Format = format;
             raw_desc.Flags = 0;
+            // Sampling depth/stencil through an SRV does not require the DSV to
+            // be writable. Marks the read-only aspects so the driver can keep
+            // them out of the write path; depth-stencil writes need no flags.
+            if !desc.usage.contains(wgt::TextureUses::DEPTH_STENCIL_WRITE) {
+                if aspects.contains(crate::FormatAspects::DEPTH) {
+                    raw_desc.Flags |= Direct3D11::D3D11_DSV_READ_ONLY_DEPTH.0 as u32;
+                }
+                if aspects.contains(crate::FormatAspects::STENCIL) {
+                    raw_desc.Flags |= Direct3D11::D3D11_DSV_READ_ONLY_STENCIL.0 as u32;
+                }
+            }
             if is_array {
                 raw_desc.ViewDimension = d3d::D3D11_DSV_DIMENSION_TEXTURE2DARRAY;
                 raw_desc.Anonymous.Texture2DArray = d3d::D3D11_TEX2D_ARRAY_DSV {
@@ -1011,6 +1119,15 @@ impl crate::Device for Device {
         &self,
         desc: &crate::SamplerDescriptor,
     ) -> Result<Sampler, crate::DeviceError> {
+        // Anisotropic filtering is not advertised as a feature, but the
+        // descriptor is still validated against the D3D11 range so an invalid
+        // clamp cannot be forwarded to the driver.
+        if !(1..=16).contains(&desc.anisotropy_clamp) {
+            return Err(unexpected(
+                "D3D11 sampler anisotropy_clamp must be between 1 and 16",
+            ));
+        }
+
         let sampler_desc = Direct3D11::D3D11_SAMPLER_DESC {
             Filter: super::conv::map_filter(
                 desc.mag_filter,
@@ -1023,7 +1140,7 @@ impl crate::Device for Device {
             AddressV: super::conv::map_address_mode(desc.address_modes[1]),
             AddressW: super::conv::map_address_mode(desc.address_modes[2]),
             MipLODBias: 0.0,
-            MaxAnisotropy: u32::from(desc.anisotropy_clamp.max(1)),
+            MaxAnisotropy: u32::from(desc.anisotropy_clamp),
             ComparisonFunc: desc
                 .compare
                 .map(super::conv::map_comparison)

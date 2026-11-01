@@ -251,6 +251,16 @@ impl crate::CommandEncoder for CommandBuffer {
         }
 
         let size = range.end - range.start;
+        // D3D11 copies and clears work in 4-byte units; the backend advertises
+        // that alignment, so reject any range that could not be expressed as a
+        // subresource box.
+        if range.start % 4 != 0 || size % 4 != 0 {
+            log::error!(
+                "D3D11 buffer clears require a 4-byte aligned range, got {:?}",
+                range
+            );
+            return;
+        }
         match buffer.map_mode() {
             BufferMapMode::Staging if buffer.cpu_writable() => {
                 let mut mapped = Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
@@ -339,6 +349,17 @@ impl crate::CommandEncoder for CommandBuffer {
         for copy in regions {
             let size = copy.size.get();
             if size == 0 {
+                continue;
+            }
+            // D3D11 expresses buffer copies through a subresource box, whose
+            // coordinates are 32-bit byte offsets, and requires 4-byte
+            // multiples. Reject unaligned copies instead of rounding them.
+            if copy.src_offset % 4 != 0 || copy.dst_offset % 4 != 0 || size % 4 != 0 {
+                log::error!(
+                    "D3D11 buffer copies require 4-byte aligned offsets and size, got {} -> {} with size {size}",
+                    copy.src_offset,
+                    copy.dst_offset
+                );
                 continue;
             }
             if copy.src_offset + size > src.size() || copy.dst_offset + size > dst.size() {
@@ -465,6 +486,20 @@ impl crate::CommandEncoder for CommandBuffer {
         let full_aspects = crate::FormatAspects::from(format);
 
         for copy in regions {
+            // The row-pitch path copies through staging buffers, which D3D11
+            // addresses in 4-byte units.
+            if copy.buffer_layout.offset % 4 != 0
+                || copy
+                    .buffer_layout
+                    .bytes_per_row
+                    .is_some_and(|bytes_per_row| bytes_per_row % 4 != 0)
+            {
+                log::error!(
+                    "D3D11 buffer-to-texture copies require 4-byte aligned offsets and row pitches"
+                );
+                continue;
+            }
+
             let aspect = copy.texture_base.aspect;
             if !aspect.is_one() || aspect != full_aspects {
                 log::error!(
@@ -577,6 +612,18 @@ impl crate::CommandEncoder for CommandBuffer {
         };
 
         for copy in regions {
+            if copy.buffer_layout.offset % 4 != 0
+                || copy
+                    .buffer_layout
+                    .bytes_per_row
+                    .is_some_and(|bytes_per_row| bytes_per_row % 4 != 0)
+            {
+                log::error!(
+                    "D3D11 texture-to-buffer copies require 4-byte aligned offsets and row pitches"
+                );
+                continue;
+            }
+
             let aspect = copy.texture_base.aspect;
             if !aspect.is_one() || aspect != full_aspects {
                 log::error!(
