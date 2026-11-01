@@ -11,8 +11,8 @@ use core::{fmt, ptr::NonNull};
 use windows::Win32::Graphics::{Direct3D, Direct3D11, Dxgi};
 
 use super::{
-    Api, Buffer, BufferMapMode, CommandBuffer, Fence, PipelineCache, Resource, Sampler,
-    ShaderModule, Texture, TextureView,
+    Api, BindGroup, BindGroupLayout, Buffer, BufferMapMode, CommandBuffer, Fence, PipelineCache,
+    PipelineLayout, Resource, Sampler, ShaderModule, Texture, TextureView,
 };
 
 /// Rounds `value` up to a multiple of `alignment`, which must be a power of two.
@@ -754,44 +754,67 @@ impl crate::Device for Device {
 
     unsafe fn create_bind_group_layout(
         &self,
-        _desc: &crate::BindGroupLayoutDescriptor,
-    ) -> Result<Resource, crate::DeviceError> {
-        unimplemented!("D3D11 bind group layout creation is not implemented yet")
+        desc: &crate::BindGroupLayoutDescriptor,
+    ) -> Result<BindGroupLayout, crate::DeviceError> {
+        BindGroupLayout::new(desc.entries)
     }
 
-    unsafe fn destroy_bind_group_layout(&self, _bg_layout: Resource) {}
+    unsafe fn destroy_bind_group_layout(&self, bg_layout: BindGroupLayout) {
+        drop(bg_layout);
+    }
 
     unsafe fn create_pipeline_layout(
         &self,
-        _desc: &crate::PipelineLayoutDescriptor<Resource>,
-    ) -> Result<Resource, crate::DeviceError> {
-        unimplemented!("D3D11 pipeline layout creation is not implemented yet")
+        desc: &crate::PipelineLayoutDescriptor<BindGroupLayout>,
+    ) -> Result<PipelineLayout, crate::DeviceError> {
+        let bind_group_layouts = desc
+            .bind_group_layouts
+            .iter()
+            .map(|layout| match layout {
+                Some(layout) => Some((*layout).clone()),
+                None => None,
+            })
+            .collect();
+        PipelineLayout::new(bind_group_layouts, desc.immediate_size)
     }
 
-    unsafe fn destroy_pipeline_layout(&self, _pipeline_layout: Resource) {}
+    unsafe fn destroy_pipeline_layout(&self, pipeline_layout: PipelineLayout) {
+        drop(pipeline_layout);
+    }
 
     unsafe fn create_bind_group(
         &self,
-        _desc: &crate::BindGroupDescriptor<'_, Resource, Buffer, Sampler, TextureView, Resource>,
-    ) -> Result<Resource, crate::DeviceError> {
-        unimplemented!("D3D11 bind group creation is not implemented yet")
+        desc: &crate::BindGroupDescriptor<
+            '_,
+            BindGroupLayout,
+            Buffer,
+            Sampler,
+            TextureView,
+            Resource,
+        >,
+    ) -> Result<BindGroup, crate::DeviceError> {
+        BindGroup::new(desc)
     }
 
-    unsafe fn destroy_bind_group(&self, _group: Resource) {}
+    unsafe fn destroy_bind_group(&self, group: BindGroup) {
+        drop(group);
+    }
 
     unsafe fn create_shader_module(
         &self,
-        _desc: &crate::ShaderModuleDescriptor,
-        _shader: crate::ShaderInput,
+        desc: &crate::ShaderModuleDescriptor,
+        shader: crate::ShaderInput,
     ) -> Result<ShaderModule, crate::ShaderError> {
-        unimplemented!("D3D11 shader compilation is not implemented yet")
+        ShaderModule::new(desc, shader)
     }
 
-    unsafe fn destroy_shader_module(&self, _module: ShaderModule) {}
+    unsafe fn destroy_shader_module(&self, module: ShaderModule) {
+        drop(module);
+    }
 
     unsafe fn create_render_pipeline(
         &self,
-        _desc: &crate::RenderPipelineDescriptor<Resource, ShaderModule, PipelineCache>,
+        _desc: &crate::RenderPipelineDescriptor<PipelineLayout, ShaderModule, PipelineCache>,
     ) -> Result<Resource, crate::PipelineError> {
         unimplemented!("D3D11 render pipeline creation is not implemented yet")
     }
@@ -800,7 +823,7 @@ impl crate::Device for Device {
 
     unsafe fn create_compute_pipeline(
         &self,
-        _desc: &crate::ComputePipelineDescriptor<Resource, ShaderModule, PipelineCache>,
+        _desc: &crate::ComputePipelineDescriptor<PipelineLayout, ShaderModule, PipelineCache>,
     ) -> Result<Resource, crate::PipelineError> {
         unimplemented!("D3D11 compute pipeline creation is not implemented yet")
     }
@@ -809,7 +832,7 @@ impl crate::Device for Device {
 
     unsafe fn create_ray_tracing_pipeline(
         &self,
-        _desc: &crate::RayTracingPipelineDescriptor<Resource, ShaderModule, PipelineCache>,
+        _desc: &crate::RayTracingPipelineDescriptor<PipelineLayout, ShaderModule, PipelineCache>,
     ) -> Result<Resource, crate::PipelineError> {
         unimplemented!("D3D11 does not support ray tracing")
     }
