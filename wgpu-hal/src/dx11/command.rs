@@ -160,6 +160,49 @@ struct RenderPassState {
     sample_count: u32,
 }
 
+/// Removes trailing empty color attachments, which D3D11 omits from the
+/// render target array and pipelines may leave out.
+fn color_formats_trimmed(
+    formats: &[Option<Dxgi::Common::DXGI_FORMAT>],
+) -> &[Option<Dxgi::Common::DXGI_FORMAT>] {
+    let mut len = formats.len();
+    while len > 0 && formats[len - 1].is_none() {
+        len -= 1;
+    }
+    &formats[..len]
+}
+
+impl RenderPassState {
+    /// Checks that `pipeline` can be used with this render pass without
+    /// creating an invalid D3D11 pipeline combination.
+    fn validate_pipeline(&self, pipeline: &RenderPipeline) -> Result<(), String> {
+        if self.sample_count != pipeline.sample_count() {
+            return Err(format!(
+                "sample count mismatch: render pass has {}, pipeline has {}",
+                self.sample_count,
+                pipeline.sample_count()
+            ));
+        }
+        if color_formats_trimmed(&self.color_formats)
+            != color_formats_trimmed(pipeline.color_formats())
+        {
+            return Err(format!(
+                "color formats mismatch: render pass has {:?}, pipeline has {:?}",
+                self.color_formats,
+                pipeline.color_formats()
+            ));
+        }
+        if self.depth_format != pipeline.depth_format() {
+            return Err(format!(
+                "depth format mismatch: render pass has {:?}, pipeline has {:?}",
+                self.depth_format,
+                pipeline.depth_format()
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Command buffer type, which also acts as the command encoder.
 ///
 /// Keeping a single type for both roles follows the structure of the noop
@@ -177,6 +220,8 @@ pub struct CommandBuffer {
     sample_mask: u32,
     stencil_reference: u32,
     render_pass: Option<RenderPassState>,
+    /// Whether `IASetIndexBuffer` has been called for the current render pass.
+    index_buffer_set: bool,
     /// First explicit encoding error. `end_encoding` reports it instead of
     /// producing a command buffer that would submit partial state.
     error: Option<String>,
@@ -199,6 +244,7 @@ impl CommandBuffer {
             sample_mask: u32::MAX,
             stencil_reference: 0,
             render_pass: None,
+            index_buffer_set: false,
             error: None,
         }
     }
@@ -218,11 +264,17 @@ impl crate::CommandEncoder for CommandBuffer {
 
     unsafe fn begin_encoding(&mut self, _label: crate::Label) -> Result<(), crate::DeviceError> {
         self.error = None;
+        self.render_pass = None;
+        self.current_pipeline = None;
+        self.index_buffer_set = false;
         Ok(())
     }
 
     unsafe fn discard_encoding(&mut self) {
         self.error = None;
+        self.render_pass = None;
+        self.current_pipeline = None;
+        self.index_buffer_set = false;
     }
 
     unsafe fn end_encoding(&mut self) -> Result<CommandBuffer, crate::DeviceError> {
@@ -846,18 +898,30 @@ impl crate::CommandEncoder for CommandBuffer {
         _dst: &Resource,
         _copy: wgt::AccelerationStructureCopy,
     ) {
+        self.encoder_error("D3D11 acceleration structure copies are not implemented".to_owned());
     }
 
-    unsafe fn begin_query(&mut self, _set: &Resource, _index: u32) {}
-    unsafe fn end_query(&mut self, _set: &Resource, _index: u32) {}
-    unsafe fn write_timestamp(&mut self, _set: &Resource, _index: u32) {}
+    unsafe fn begin_query(&mut self, _set: &Resource, _index: u32) {
+        self.encoder_error("D3D11 begin_query is not implemented".to_owned());
+    }
+    unsafe fn end_query(&mut self, _set: &Resource, _index: u32) {
+        self.encoder_error("D3D11 end_query is not implemented".to_owned());
+    }
+    unsafe fn write_timestamp(&mut self, _set: &Resource, _index: u32) {
+        self.encoder_error("D3D11 write_timestamp is not implemented".to_owned());
+    }
     unsafe fn read_acceleration_structure_compact_size(
         &mut self,
         _acceleration_structure: &Resource,
         _buf: &Buffer,
     ) {
+        self.encoder_error(
+            "D3D11 acceleration structure compact size queries are not implemented".to_owned(),
+        );
     }
-    unsafe fn reset_queries(&mut self, _set: &Resource, _range: Range<u32>) {}
+    unsafe fn reset_queries(&mut self, _set: &Resource, _range: Range<u32>) {
+        self.encoder_error("D3D11 reset_queries is not implemented".to_owned());
+    }
     unsafe fn copy_query_results(
         &mut self,
         _set: &Resource,
@@ -866,6 +930,7 @@ impl crate::CommandEncoder for CommandBuffer {
         _offset: wgt::BufferAddress,
         _stride: wgt::BufferSize,
     ) {
+        self.encoder_error("D3D11 copy_query_results is not implemented".to_owned());
     }
 
     // render
@@ -1054,6 +1119,9 @@ impl crate::CommandEncoder for CommandBuffer {
             depth_format,
             sample_count: desc.sample_count,
         });
+        // Pipeline and index-buffer state belong to the previous pass.
+        self.current_pipeline = None;
+        self.index_buffer_set = false;
 
         Ok(())
     }
@@ -1067,6 +1135,7 @@ impl crate::CommandEncoder for CommandBuffer {
         }
         self.render_pass = None;
         self.current_pipeline = None;
+        self.index_buffer_set = false;
     }
 
     unsafe fn set_bind_group(
@@ -1360,20 +1429,21 @@ impl crate::CommandEncoder for CommandBuffer {
     unsafe fn end_debug_marker(&mut self) {}
 
     unsafe fn set_render_pipeline(&mut self, pipeline: &RenderPipeline) {
-        if let Some(render_pass) = &self.render_pass {
-            if pipeline.sample_count() != render_pass.sample_count {
-                log::error!(
-                    "D3D11 render pipeline sample count {} does not match the render pass sample count {}",
-                    pipeline.sample_count(),
-                    render_pass.sample_count
-                );
-            }
-            if pipeline.color_formats() != render_pass.color_formats.as_slice() {
-                log::error!("D3D11 render pipeline color formats do not match the render pass");
-            }
-            if pipeline.depth_format() != render_pass.depth_format {
-                log::error!("D3D11 render pipeline depth format does not match the render pass");
-            }
+        if self.render_pass.is_none() {
+            self.encoder_error("set_render_pipeline called outside a render pass".to_owned());
+            return;
+        }
+        let validation = self
+            .render_pass
+            .as_ref()
+            .map(|render_pass| render_pass.validate_pipeline(pipeline))
+            .unwrap_or(Ok(()));
+        if let Err(message) = validation {
+            self.encoder_error(format!(
+                "render pipeline is incompatible with the active render pass: {message}"
+            ));
+            self.current_pipeline = None;
+            return;
         }
 
         self.current_blend_state = Some(pipeline.raw_blend_state().clone());
@@ -1406,11 +1476,11 @@ impl crate::CommandEncoder for CommandBuffer {
         format: wgt::IndexFormat,
     ) {
         if !binding.buffer.usage().contains(wgt::BufferUses::INDEX) {
-            log::error!("D3D11 index buffer was not created with INDEX usage");
+            self.encoder_error("D3D11 index buffer was not created with INDEX usage".to_owned());
             return;
         }
         let Ok(offset) = u32::try_from(binding.offset) else {
-            log::error!("D3D11 index buffer offset does not fit in u32");
+            self.encoder_error("D3D11 index buffer offset does not fit in u32".to_owned());
             return;
         };
         let format = super::conv::map_index_format(format);
@@ -1418,6 +1488,7 @@ impl crate::CommandEncoder for CommandBuffer {
             self.context
                 .IASetIndexBuffer(binding.buffer.raw(), format, offset)
         };
+        self.index_buffer_set = true;
     }
 
     unsafe fn set_vertex_buffer<'a>(
@@ -1426,28 +1497,41 @@ impl crate::CommandEncoder for CommandBuffer {
         binding: crate::BufferBinding<'a, Buffer>,
     ) {
         if index >= Direct3D11::D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT {
-            log::error!("D3D11 vertex buffer slot {index} is outside the supported range");
+            self.encoder_error(format!(
+                "D3D11 vertex buffer slot {index} is outside the supported range"
+            ));
             return;
         }
         if !binding.buffer.usage().contains(wgt::BufferUses::VERTEX) {
-            log::error!("D3D11 vertex buffer was not created with VERTEX usage");
+            self.encoder_error("D3D11 vertex buffer was not created with VERTEX usage".to_owned());
             return;
         }
-        let Some(pipeline) = self.current_pipeline.as_ref() else {
-            log::error!("D3D11 set_vertex_buffer called before set_render_pipeline");
+        if self.current_pipeline.is_none() {
+            self.encoder_error(
+                "D3D11 set_vertex_buffer called before set_render_pipeline".to_owned(),
+            );
             return;
-        };
-        let Some(Some(stride)) = pipeline.vertex_strides.get(index as usize) else {
-            log::error!("D3D11 render pipeline does not declare vertex buffer slot {index}");
+        }
+        let stride = self.current_pipeline.as_ref().and_then(|pipeline| {
+            pipeline
+                .vertex_strides
+                .get(index as usize)
+                .copied()
+                .flatten()
+        });
+        let Some(stride) = stride else {
+            self.encoder_error(format!(
+                "D3D11 render pipeline does not declare vertex buffer slot {index}"
+            ));
             return;
         };
         let Ok(offset) = u32::try_from(binding.offset) else {
-            log::error!("D3D11 vertex buffer offset does not fit in u32");
+            self.encoder_error("D3D11 vertex buffer offset does not fit in u32".to_owned());
             return;
         };
 
         let buffers = [Some(binding.buffer.raw().clone())];
-        let strides = [*stride];
+        let strides = [stride];
         let offsets = [offset];
         unsafe {
             self.context.IASetVertexBuffers(
@@ -1462,14 +1546,14 @@ impl crate::CommandEncoder for CommandBuffer {
 
     unsafe fn set_viewport(&mut self, rect: &crate::Rect<f32>, depth_range: Range<f32>) {
         if !(rect.w > 0.0) || !(rect.h > 0.0) {
-            log::error!("D3D11 viewport width and height must be positive");
+            self.encoder_error("D3D11 viewport width and height must be positive".to_owned());
             return;
         }
         if !(0.0..=1.0).contains(&depth_range.start)
             || !(0.0..=1.0).contains(&depth_range.end)
             || depth_range.start > depth_range.end
         {
-            log::error!("D3D11 viewport depth range must be within 0..=1");
+            self.encoder_error("D3D11 viewport depth range must be within 0..=1".to_owned());
             return;
         }
         let viewport = Direct3D11::D3D11_VIEWPORT {
@@ -1484,13 +1568,35 @@ impl crate::CommandEncoder for CommandBuffer {
     }
 
     unsafe fn set_scissor_rect(&mut self, rect: &crate::Rect<u32>) {
-        let right = rect.x.saturating_add(rect.w);
-        let bottom = rect.y.saturating_add(rect.h);
+        let Some(right) = rect.x.checked_add(rect.w) else {
+            self.encoder_error("D3D11 scissor rectangle coordinates overflow u32".to_owned());
+            return;
+        };
+        let Some(bottom) = rect.y.checked_add(rect.h) else {
+            self.encoder_error("D3D11 scissor rectangle coordinates overflow u32".to_owned());
+            return;
+        };
+        let Ok(left) = i32::try_from(rect.x) else {
+            self.encoder_error("D3D11 scissor rectangle coordinates do not fit in i32".to_owned());
+            return;
+        };
+        let Ok(top) = i32::try_from(rect.y) else {
+            self.encoder_error("D3D11 scissor rectangle coordinates do not fit in i32".to_owned());
+            return;
+        };
+        let Ok(right) = i32::try_from(right) else {
+            self.encoder_error("D3D11 scissor rectangle coordinates do not fit in i32".to_owned());
+            return;
+        };
+        let Ok(bottom) = i32::try_from(bottom) else {
+            self.encoder_error("D3D11 scissor rectangle coordinates do not fit in i32".to_owned());
+            return;
+        };
         let scissor = Foundation::RECT {
-            left: i32::try_from(rect.x).unwrap_or(i32::MAX),
-            top: i32::try_from(rect.y).unwrap_or(i32::MAX),
-            right: i32::try_from(right).unwrap_or(i32::MAX),
-            bottom: i32::try_from(bottom).unwrap_or(i32::MAX),
+            left,
+            top,
+            right,
+            bottom,
         };
         unsafe { self.context.RSSetScissorRects(Some(&[scissor])) };
     }
@@ -1520,11 +1626,11 @@ impl crate::CommandEncoder for CommandBuffer {
         instance_count: u32,
     ) {
         if self.render_pass.is_none() {
-            log::error!("D3D11 draw called outside a render pass");
+            self.encoder_error("D3D11 draw called outside a render pass".to_owned());
             return;
         }
         if self.current_pipeline.is_none() {
-            log::error!("D3D11 draw called before set_render_pipeline");
+            self.encoder_error("D3D11 draw called before set_render_pipeline".to_owned());
             return;
         }
         if vertex_count == 0 || instance_count == 0 {
@@ -1545,14 +1651,18 @@ impl crate::CommandEncoder for CommandBuffer {
         instance_count: u32,
     ) {
         if self.render_pass.is_none() {
-            log::error!("D3D11 indexed draw called outside a render pass");
+            self.encoder_error("D3D11 indexed draw called outside a render pass".to_owned());
             return;
         }
         if self.current_pipeline.is_none() {
-            log::error!("D3D11 indexed draw called before set_render_pipeline");
+            self.encoder_error("D3D11 indexed draw called before set_render_pipeline".to_owned());
             return;
         }
         if index_count == 0 || instance_count == 0 {
+            return;
+        }
+        if !self.index_buffer_set {
+            self.encoder_error("D3D11 indexed draw called before set_index_buffer".to_owned());
             return;
         }
         unsafe {
@@ -1572,7 +1682,7 @@ impl crate::CommandEncoder for CommandBuffer {
         _group_count_y: u32,
         _group_count_z: u32,
     ) {
-        log::error!("D3D11 mesh shader draws are not implemented");
+        self.encoder_error("D3D11 mesh shader draws are not implemented".to_owned());
     }
 
     unsafe fn draw_indirect(
@@ -1582,36 +1692,44 @@ impl crate::CommandEncoder for CommandBuffer {
         draw_count: u32,
     ) {
         if self.render_pass.is_none() || self.current_pipeline.is_none() {
-            log::error!("D3D11 draw_indirect called without a render pass and pipeline");
+            self.encoder_error(
+                "D3D11 draw_indirect called without a render pass and pipeline".to_owned(),
+            );
             return;
         }
         if !buffer.usage().contains(wgt::BufferUses::INDIRECT) {
-            log::error!("D3D11 indirect draw buffer was not created with INDIRECT usage");
+            self.encoder_error(
+                "D3D11 indirect draw buffer was not created with INDIRECT usage".to_owned(),
+            );
             return;
         }
         if offset % 4 != 0 {
-            log::error!("D3D11 indirect draw offset must be 4-byte aligned");
+            self.encoder_error("D3D11 indirect draw offset must be 4-byte aligned".to_owned());
             return;
         }
         let Some(total) = u64::from(draw_count).checked_mul(16) else {
-            log::error!("D3D11 indirect draw argument size overflowed");
+            self.encoder_error("D3D11 indirect draw argument size overflowed".to_owned());
             return;
         };
         if offset
             .checked_add(total)
             .is_none_or(|end| end > buffer.size())
         {
-            log::error!("D3D11 indirect draw arguments are outside the buffer");
+            self.encoder_error("D3D11 indirect draw arguments are outside the buffer".to_owned());
             return;
         }
         let Ok(offset) = u32::try_from(offset) else {
-            log::error!("D3D11 indirect draw offset does not fit in u32");
+            self.encoder_error("D3D11 indirect draw offset does not fit in u32".to_owned());
             return;
         };
 
         for draw in 0..draw_count {
-            let Some(draw_offset) = offset.checked_add(draw * 16) else {
-                log::error!("D3D11 indirect draw offset overflowed");
+            let Some(relative_offset) = draw.checked_mul(16) else {
+                self.encoder_error("D3D11 indirect draw offset overflowed".to_owned());
+                return;
+            };
+            let Some(draw_offset) = offset.checked_add(relative_offset) else {
+                self.encoder_error("D3D11 indirect draw offset overflowed".to_owned());
                 return;
             };
             unsafe {
@@ -1628,36 +1746,52 @@ impl crate::CommandEncoder for CommandBuffer {
         draw_count: u32,
     ) {
         if self.render_pass.is_none() || self.current_pipeline.is_none() {
-            log::error!("D3D11 draw_indexed_indirect called without a render pass and pipeline");
+            self.encoder_error(
+                "D3D11 draw_indexed_indirect called without a render pass and pipeline".to_owned(),
+            );
+            return;
+        }
+        if !self.index_buffer_set {
+            self.encoder_error(
+                "D3D11 indexed indirect draw called before set_index_buffer".to_owned(),
+            );
             return;
         }
         if !buffer.usage().contains(wgt::BufferUses::INDIRECT) {
-            log::error!("D3D11 indirect draw buffer was not created with INDIRECT usage");
+            self.encoder_error(
+                "D3D11 indirect draw buffer was not created with INDIRECT usage".to_owned(),
+            );
             return;
         }
         if offset % 4 != 0 {
-            log::error!("D3D11 indirect draw offset must be 4-byte aligned");
+            self.encoder_error("D3D11 indirect draw offset must be 4-byte aligned".to_owned());
             return;
         }
         let Some(total) = u64::from(draw_count).checked_mul(20) else {
-            log::error!("D3D11 indexed indirect draw argument size overflowed");
+            self.encoder_error("D3D11 indexed indirect draw argument size overflowed".to_owned());
             return;
         };
         if offset
             .checked_add(total)
             .is_none_or(|end| end > buffer.size())
         {
-            log::error!("D3D11 indexed indirect draw arguments are outside the buffer");
+            self.encoder_error(
+                "D3D11 indexed indirect draw arguments are outside the buffer".to_owned(),
+            );
             return;
         }
         let Ok(offset) = u32::try_from(offset) else {
-            log::error!("D3D11 indexed indirect draw offset does not fit in u32");
+            self.encoder_error("D3D11 indexed indirect draw offset does not fit in u32".to_owned());
             return;
         };
 
         for draw in 0..draw_count {
-            let Some(draw_offset) = offset.checked_add(draw * 20) else {
-                log::error!("D3D11 indexed indirect draw offset overflowed");
+            let Some(relative_offset) = draw.checked_mul(20) else {
+                self.encoder_error("D3D11 indexed indirect draw offset overflowed".to_owned());
+                return;
+            };
+            let Some(draw_offset) = offset.checked_add(relative_offset) else {
+                self.encoder_error("D3D11 indexed indirect draw offset overflowed".to_owned());
                 return;
             };
             unsafe {
@@ -1673,7 +1807,7 @@ impl crate::CommandEncoder for CommandBuffer {
         _offset: wgt::BufferAddress,
         _draw_count: u32,
     ) {
-        log::error!("D3D11 mesh shader indirect draws are not implemented");
+        self.encoder_error("D3D11 mesh shader indirect draws are not implemented".to_owned());
     }
 
     unsafe fn draw_indirect_count(
@@ -1684,7 +1818,7 @@ impl crate::CommandEncoder for CommandBuffer {
         _count_offset: wgt::BufferAddress,
         _max_count: u32,
     ) {
-        log::error!("D3D11 draw_indirect_count is not implemented");
+        self.encoder_error("D3D11 draw_indirect_count is not implemented".to_owned());
     }
 
     unsafe fn draw_indexed_indirect_count(
@@ -1695,7 +1829,7 @@ impl crate::CommandEncoder for CommandBuffer {
         _count_offset: wgt::BufferAddress,
         _max_count: u32,
     ) {
-        log::error!("D3D11 draw_indexed_indirect_count is not implemented");
+        self.encoder_error("D3D11 draw_indexed_indirect_count is not implemented".to_owned());
     }
 
     unsafe fn draw_mesh_tasks_indirect_count(
@@ -1706,22 +1840,31 @@ impl crate::CommandEncoder for CommandBuffer {
         _count_offset: wgt::BufferAddress,
         _max_count: u32,
     ) {
-        log::error!("D3D11 mesh shader indirect count draws are not implemented");
+        self.encoder_error("D3D11 mesh shader indirect count draws are not implemented".to_owned());
     }
 
     // compute
 
-    unsafe fn begin_compute_pass(&mut self, _desc: &crate::ComputePassDescriptor<Resource>) {}
-    unsafe fn end_compute_pass(&mut self) {}
+    unsafe fn begin_compute_pass(&mut self, _desc: &crate::ComputePassDescriptor<Resource>) {
+        self.encoder_error("D3D11 compute passes are not implemented".to_owned());
+    }
+    unsafe fn end_compute_pass(&mut self) {
+        self.encoder_error("D3D11 compute passes are not implemented".to_owned());
+    }
 
-    unsafe fn set_compute_pipeline(&mut self, _pipeline: &Resource) {}
+    unsafe fn set_compute_pipeline(&mut self, _pipeline: &Resource) {
+        self.encoder_error("D3D11 compute pipelines are not implemented".to_owned());
+    }
 
-    unsafe fn dispatch_workgroups(&mut self, _count: [u32; 3]) {}
+    unsafe fn dispatch_workgroups(&mut self, _count: [u32; 3]) {
+        self.encoder_error("D3D11 compute dispatches are not implemented".to_owned());
+    }
     unsafe fn dispatch_workgroups_indirect(
         &mut self,
         _buffer: &Buffer,
         _offset: wgt::BufferAddress,
     ) {
+        self.encoder_error("D3D11 compute indirect dispatches are not implemented".to_owned());
     }
 
     unsafe fn build_acceleration_structures<'a, T>(
@@ -1732,12 +1875,14 @@ impl crate::CommandEncoder for CommandBuffer {
         Api: 'a,
         T: IntoIterator<Item = crate::BuildAccelerationStructureDescriptor<'a, Buffer, Resource>>,
     {
+        self.encoder_error("D3D11 acceleration structure builds are not implemented".to_owned());
     }
 
     unsafe fn place_acceleration_structure_barrier(
         &mut self,
         _barriers: crate::AccelerationStructureBarrier,
     ) {
+        self.encoder_error("D3D11 acceleration structure barriers are not implemented".to_owned());
     }
 
     unsafe fn set_acceleration_structure_dependencies(

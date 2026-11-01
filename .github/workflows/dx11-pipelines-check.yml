@@ -1,0 +1,50 @@
+name: DX11 pipelines check
+
+# Branch-local gate for the P4 delivery (`dx11-hal-pipelines`). It compiles the
+# D3D11 HAL and runs the render-pipeline/render-pass suite plus the P1-P3 DX11
+# regression tests on a Windows runner. It does not replace P6's canonical
+# `dx11-contract.yml`.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - dx11-hal-pipelines
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  check-windows:
+    name: Windows DX11 pipelines and render passes
+    runs-on: windows-2025
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check wgpu-hal with the DX11 backend
+        run: cargo check -p wgpu-hal --features dx11
+
+      - name: Run DX11 pipeline and render-pass tests
+        run: >-
+          cargo test -p wgpu-hal --features dx11
+          --test dx11_pipelines
+          --test dx11_contract
+          --test dx11_resources
+          --test dx11_shaders
+          --test dx11_descriptors
+          -- --nocapture
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
