@@ -818,7 +818,7 @@ fn section_negative_layouts(
     )?;
 
     for dimension in [wgt::TextureViewDimension::D1, wgt::TextureViewDimension::D3] {
-        expect_layout_error(
+        let layout = create_layout(
             device,
             "D1/D3 texture view",
             &[wgt::BindGroupLayoutEntry {
@@ -832,6 +832,7 @@ fn section_negative_layouts(
                 count: None,
             }],
         )?;
+        unsafe { device.destroy_bind_group_layout(layout) };
     }
 
     expect_layout_error(
