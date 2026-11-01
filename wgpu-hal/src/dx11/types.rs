@@ -1,4 +1,4 @@
-use alloc::{string::String, vec::Vec};
+use alloc::{format, string::String, vec::Vec};
 use core::{
     borrow::Borrow,
     sync::atomic::{AtomicBool, Ordering},
@@ -8,6 +8,57 @@ use windows::Win32::{
     Foundation,
     Graphics::{Direct3D, Direct3D11, Dxgi},
 };
+
+/// D3D11 constant-buffer slots available per shader stage (`b0`..`b13`).
+const D3D11_CONSTANT_BUFFER_SLOTS: u32 =
+    Direct3D11::D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT;
+/// D3D11 shader-resource slots available per shader stage (`t0`..`t127`).
+const D3D11_SRV_SLOTS: u32 = Direct3D11::D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT;
+/// D3D11 sampler slots available per shader stage (`s0`..`s15`).
+const D3D11_SAMPLER_SLOTS: u32 = Direct3D11::D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT;
+
+/// Binding counters for one shader stage, used to enforce the advertised
+/// per-stage limits while constructing bind group and pipeline layouts.
+#[derive(Clone, Copy, Debug, Default)]
+struct StageBindingCounts {
+    uniform_buffers: u32,
+    sampled_textures: u32,
+    samplers: u32,
+}
+
+/// Checks the per-stage binding counters against the advertised limits.
+fn validate_stage_counts(
+    counts: StageBindingCounts,
+    limits: &wgt::Limits,
+    stage: &str,
+    context: &str,
+) -> Result<(), crate::DeviceError> {
+    if counts.uniform_buffers > limits.max_uniform_buffers_per_shader_stage {
+        log::error!(
+            "D3D11 {context} requests {} uniform buffers in the {stage} stage, at most {} are supported",
+            counts.uniform_buffers,
+            limits.max_uniform_buffers_per_shader_stage
+        );
+        return Err(crate::DeviceError::Unexpected);
+    }
+    if counts.sampled_textures > limits.max_sampled_textures_per_shader_stage {
+        log::error!(
+            "D3D11 {context} requests {} sampled textures in the {stage} stage, at most {} are supported",
+            counts.sampled_textures,
+            limits.max_sampled_textures_per_shader_stage
+        );
+        return Err(crate::DeviceError::Unexpected);
+    }
+    if counts.samplers > limits.max_samplers_per_shader_stage {
+        log::error!(
+            "D3D11 {context} requests {} samplers in the {stage} stage, at most {} are supported",
+            counts.samplers,
+            limits.max_samplers_per_shader_stage
+        );
+        return Err(crate::DeviceError::Unexpected);
+    }
+    Ok(())
+}
 
 /// Placeholder for every GPU resource type that is not implemented yet.
 ///
@@ -306,13 +357,19 @@ pub struct BindGroupLayoutEntry {
 pub struct BindGroupLayout {
     entries: Vec<BindGroupLayoutEntry>,
     dynamic_offsets: Vec<u32>,
+    limits: wgt::Limits,
 }
 
 impl BindGroupLayout {
-    pub(crate) fn new(entries: &[wgt::BindGroupLayoutEntry]) -> Result<Self, crate::DeviceError> {
+    pub(crate) fn new(
+        entries: &[wgt::BindGroupLayoutEntry],
+        limits: &wgt::Limits,
+    ) -> Result<Self, crate::DeviceError> {
         let mut normalized = Vec::with_capacity(entries.len());
         let mut dynamic_offsets = Vec::new();
         let mut previous = None;
+        let mut vertex_counts = StageBindingCounts::default();
+        let mut fragment_counts = StageBindingCounts::default();
 
         for entry in entries {
             if previous.is_some_and(|binding| binding >= entry.binding) {
@@ -320,6 +377,40 @@ impl BindGroupLayout {
                 return Err(crate::DeviceError::Unexpected);
             }
             previous = Some(entry.binding);
+
+            if entry.binding >= limits.max_bindings_per_bind_group {
+                log::error!(
+                    "D3D11 bind group layout binding {} is outside the advertised limit of {} bindings per group",
+                    entry.binding,
+                    limits.max_bindings_per_bind_group
+                );
+                return Err(crate::DeviceError::Unexpected);
+            }
+
+            // Compute shaders are not advertised: only vertex and fragment
+            // bindings can ever be used.
+            let allowed_visibility = wgt::ShaderStages::VERTEX | wgt::ShaderStages::FRAGMENT;
+            if entry.visibility.is_empty() || !allowed_visibility.contains(entry.visibility) {
+                log::error!(
+                    "D3D11 bind group layout binding {} has visibility {:?}; only VERTEX and FRAGMENT are supported",
+                    entry.binding,
+                    entry.visibility
+                );
+                return Err(crate::DeviceError::Unexpected);
+            }
+
+            // `max_binding_array_*` is zero in the advertised contract:
+            // D3D11 registers are flattened into single slots, so no kind of
+            // binding array can be represented.
+            let count = entry.count.map_or(1, core::num::NonZeroU32::get);
+            if count > 1 {
+                log::error!(
+                    "D3D11 does not support binding arrays (binding {} has count {}); all `max_binding_array_*` limits are zero",
+                    entry.binding,
+                    count
+                );
+                return Err(crate::DeviceError::Unexpected);
+            }
 
             match entry.ty {
                 // No storage binding may be accepted and then silently dropped.
@@ -355,6 +446,75 @@ impl BindGroupLayout {
                     log::error!("D3D11 does not support this binding type: {:?}", entry.ty);
                     return Err(crate::DeviceError::Unexpected);
                 }
+                wgt::BindingType::Texture {
+                    multisampled,
+                    view_dimension,
+                    ..
+                } => {
+                    if multisampled {
+                        log::error!(
+                            "D3D11 does not support multisampled textures (binding {})",
+                            entry.binding
+                        );
+                        return Err(crate::DeviceError::Unexpected);
+                    }
+                    if matches!(
+                        view_dimension,
+                        wgt::TextureViewDimension::D1 | wgt::TextureViewDimension::D3
+                    ) {
+                        log::error!(
+                            "D3D11 only supports D2, D2Array, Cube and CubeArray texture views (binding {} requests {view_dimension:?})",
+                            entry.binding
+                        );
+                        return Err(crate::DeviceError::Unexpected);
+                    }
+                }
+                wgt::BindingType::Buffer {
+                    ty: wgt::BufferBindingType::Uniform,
+                    min_binding_size: Some(min_binding_size),
+                    ..
+                } => {
+                    if min_binding_size.get() > limits.max_uniform_buffer_binding_size {
+                        log::error!(
+                            "D3D11 uniform binding {} requires {} bytes, more than the advertised maximum of {}",
+                            entry.binding,
+                            min_binding_size.get(),
+                            limits.max_uniform_buffer_binding_size
+                        );
+                        return Err(crate::DeviceError::Unexpected);
+                    }
+                }
+                _ => {}
+            }
+
+            match entry.ty {
+                wgt::BindingType::Buffer {
+                    ty: wgt::BufferBindingType::Uniform,
+                    ..
+                } => {
+                    if entry.visibility.contains(wgt::ShaderStages::VERTEX) {
+                        vertex_counts.uniform_buffers += 1;
+                    }
+                    if entry.visibility.contains(wgt::ShaderStages::FRAGMENT) {
+                        fragment_counts.uniform_buffers += 1;
+                    }
+                }
+                wgt::BindingType::Texture { .. } => {
+                    if entry.visibility.contains(wgt::ShaderStages::VERTEX) {
+                        vertex_counts.sampled_textures += 1;
+                    }
+                    if entry.visibility.contains(wgt::ShaderStages::FRAGMENT) {
+                        fragment_counts.sampled_textures += 1;
+                    }
+                }
+                wgt::BindingType::Sampler(_) => {
+                    if entry.visibility.contains(wgt::ShaderStages::VERTEX) {
+                        vertex_counts.samplers += 1;
+                    }
+                    if entry.visibility.contains(wgt::ShaderStages::FRAGMENT) {
+                        fragment_counts.samplers += 1;
+                    }
+                }
                 _ => {}
             }
 
@@ -366,13 +526,17 @@ impl BindGroupLayout {
                 binding: entry.binding,
                 visibility: entry.visibility,
                 ty: entry.ty,
-                count: entry.count.map_or(1, core::num::NonZeroU32::get),
+                count,
             });
         }
+
+        validate_stage_counts(vertex_counts, limits, "vertex", "bind group layout")?;
+        validate_stage_counts(fragment_counts, limits, "fragment", "bind group layout")?;
 
         Ok(Self {
             entries: normalized,
             dynamic_offsets,
+            limits: limits.clone(),
         })
     }
 
@@ -388,6 +552,19 @@ impl BindGroupLayout {
     pub fn entry(&self, binding: u32) -> Option<&BindGroupLayoutEntry> {
         self.entries.iter().find(|entry| entry.binding == binding)
     }
+
+    /// Limits captured when the layout was created, used to validate bind
+    /// groups without changing the public `Device::create_bind_group` API.
+    pub(crate) fn limits(&self) -> &wgt::Limits {
+        &self.limits
+    }
+
+    /// Whether two layouts describe the same bindings. The limit snapshot is
+    /// deliberately excluded: two groups from the same device carry the same
+    /// limits, and only the bindings determine register compatibility.
+    pub(crate) fn same_layout(&self, other: &Self) -> bool {
+        self.entries == other.entries && self.dynamic_offsets == other.dynamic_offsets
+    }
 }
 
 /// CPU-side pipeline layout.
@@ -399,6 +576,7 @@ impl BindGroupLayout {
 pub struct PipelineLayout {
     bind_group_layouts: Vec<Option<BindGroupLayout>>,
     immediate_size: u32,
+    limits: wgt::Limits,
     naga_options: naga::back::hlsl::Options,
 }
 
@@ -406,21 +584,24 @@ impl PipelineLayout {
     pub(crate) fn new(
         bind_group_layouts: Vec<Option<BindGroupLayout>>,
         immediate_size: u32,
+        limits: wgt::Limits,
+        context1_available: bool,
     ) -> Result<Self, crate::DeviceError> {
-        if bind_group_layouts.len() > crate::MAX_BIND_GROUPS {
+        if bind_group_layouts.len() > limits.max_bind_groups as usize {
             log::error!(
                 "D3D11 pipeline layout has {} bind groups, at most {} are supported",
                 bind_group_layouts.len(),
-                crate::MAX_BIND_GROUPS
+                limits.max_bind_groups
             );
             return Err(crate::DeviceError::Unexpected);
         }
-        if immediate_size > 0 {
+        if immediate_size > limits.max_immediate_size {
             // `max_immediate_size` is advertised as 0, so no accepted pipeline
             // layout may request immediates; otherwise `set_immediates` would be
             // reachable through a layout that cannot honour it.
             log::error!(
-                "D3D11 does not support immediates, but the pipeline layout requests {immediate_size} bytes"
+                "D3D11 does not support immediates, but the pipeline layout requests {immediate_size} bytes (maximum {})",
+                limits.max_immediate_size
             );
             return Err(crate::DeviceError::Unexpected);
         }
@@ -430,68 +611,70 @@ impl PipelineLayout {
         let mut binding_map = hlsl::BindingMap::default();
         let mut next_b = 0u32;
         let mut next_t = 0u32;
-        let mut next_u = 0u32;
         let mut next_s = 0u32;
+        let mut vertex_counts = StageBindingCounts::default();
+        let mut fragment_counts = StageBindingCounts::default();
+        let mut dynamic_uniform_buffers = 0u32;
 
+        // D3D11 registers are global per shader stage, not per bind group.
+        // Naga/HLSL declares every module-level global in every entry point, so
+        // registers must be unique across the entire pipeline layout; otherwise
+        // two groups could claim the same `b`/`t`/`s` slot and the compiled
+        // shader would silently alias them.
         for (group, layout) in bind_group_layouts.iter().enumerate() {
             let Some(layout) = layout else {
                 continue;
             };
 
             for entry in &layout.entries {
+                // Binding arrays are rejected by `BindGroupLayout::new`; keep a
+                // defensive check here instead of reserving unreachable slots.
+                if entry.count > 1 {
+                    log::error!(
+                        "D3D11 pipeline layout binding (group {group}, binding {}) has count {}; binding arrays are not supported",
+                        entry.binding,
+                        entry.count
+                    );
+                    return Err(crate::DeviceError::Unexpected);
+                }
+
                 let register = match entry.ty {
                     wgt::BindingType::Buffer {
                         ty: wgt::BufferBindingType::Uniform,
+                        has_dynamic_offset,
                         ..
                     } => {
+                        if has_dynamic_offset {
+                            dynamic_uniform_buffers += 1;
+                        }
+                        if next_b >= D3D11_CONSTANT_BUFFER_SLOTS {
+                            log::error!(
+                                "D3D11 pipeline layout needs constant-buffer register b{next_b}, but only {D3D11_CONSTANT_BUFFER_SLOTS} slots exist per stage (group {group}, binding {})",
+                                entry.binding
+                            );
+                            return Err(crate::DeviceError::Unexpected);
+                        }
                         let register = next_b;
-                        next_b += entry.count;
-                        register
-                    }
-                    wgt::BindingType::Buffer {
-                        ty: wgt::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset,
-                        ..
-                    } => {
-                        if has_dynamic_offset {
-                            log::error!(
-                                "D3D11 dynamic storage buffer offsets are not implemented yet"
-                            );
-                            return Err(crate::DeviceError::Unexpected);
-                        }
-                        let register = next_t;
-                        next_t += entry.count;
-                        register
-                    }
-                    wgt::BindingType::Buffer {
-                        ty: wgt::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset,
-                        ..
-                    } => {
-                        if has_dynamic_offset {
-                            log::error!(
-                                "D3D11 dynamic storage buffer offsets are not implemented yet"
-                            );
-                            return Err(crate::DeviceError::Unexpected);
-                        }
-                        let register = next_u;
-                        next_u += entry.count;
+                        next_b += 1;
                         register
                     }
                     wgt::BindingType::Texture { .. } => {
+                        if next_t >= D3D11_SRV_SLOTS {
+                            log::error!(
+                                "D3D11 pipeline layout needs shader resource register t{next_t}, but only {D3D11_SRV_SLOTS} slots exist per stage (group {group}, binding {})",
+                                entry.binding
+                            );
+                            return Err(crate::DeviceError::Unexpected);
+                        }
                         let register = next_t;
-                        next_t += entry.count;
-                        register
-                    }
-                    wgt::BindingType::StorageTexture { .. } => {
-                        let register = next_u;
-                        next_u += entry.count;
+                        next_t += 1;
                         register
                     }
                     wgt::BindingType::Sampler(_) => {
-                        if entry.count > 1 {
+                        if next_s >= D3D11_SAMPLER_SLOTS {
                             log::error!(
-                                "D3D11 direct sampler binding mode does not support sampler arrays"
+                                "D3D11 pipeline layout needs sampler register s{next_s}, but only {D3D11_SAMPLER_SLOTS} slots exist per stage (group {group}, binding {})",
+                                entry.binding
                             );
                             return Err(crate::DeviceError::Unexpected);
                         }
@@ -499,12 +682,63 @@ impl PipelineLayout {
                         next_s += 1;
                         register
                     }
+                    wgt::BindingType::Buffer {
+                        ty: wgt::BufferBindingType::Storage { .. },
+                        ..
+                    } => {
+                        log::error!(
+                            "D3D11 does not support storage buffers in a pipeline layout (group {group}, binding {})",
+                            entry.binding
+                        );
+                        return Err(crate::DeviceError::Unexpected);
+                    }
+                    wgt::BindingType::StorageTexture { .. } => {
+                        log::error!(
+                            "D3D11 does not support storage textures in a pipeline layout (group {group}, binding {})",
+                            entry.binding
+                        );
+                        return Err(crate::DeviceError::Unexpected);
+                    }
                     wgt::BindingType::AccelerationStructure { .. }
                     | wgt::BindingType::ExternalTexture => {
-                        log::error!("D3D11 does not support this binding type: {:?}", entry.ty);
+                        log::error!(
+                            "D3D11 does not support this binding type in a pipeline layout: {:?}",
+                            entry.ty
+                        );
                         return Err(crate::DeviceError::Unexpected);
                     }
                 };
+
+                match entry.ty {
+                    wgt::BindingType::Buffer {
+                        ty: wgt::BufferBindingType::Uniform,
+                        ..
+                    } => {
+                        if entry.visibility.contains(wgt::ShaderStages::VERTEX) {
+                            vertex_counts.uniform_buffers += 1;
+                        }
+                        if entry.visibility.contains(wgt::ShaderStages::FRAGMENT) {
+                            fragment_counts.uniform_buffers += 1;
+                        }
+                    }
+                    wgt::BindingType::Texture { .. } => {
+                        if entry.visibility.contains(wgt::ShaderStages::VERTEX) {
+                            vertex_counts.sampled_textures += 1;
+                        }
+                        if entry.visibility.contains(wgt::ShaderStages::FRAGMENT) {
+                            fragment_counts.sampled_textures += 1;
+                        }
+                    }
+                    wgt::BindingType::Sampler(_) => {
+                        if entry.visibility.contains(wgt::ShaderStages::VERTEX) {
+                            vertex_counts.samplers += 1;
+                        }
+                        if entry.visibility.contains(wgt::ShaderStages::FRAGMENT) {
+                            fragment_counts.samplers += 1;
+                        }
+                    }
+                    _ => {}
+                }
 
                 binding_map.insert(
                     naga::ResourceBinding {
@@ -514,28 +748,40 @@ impl PipelineLayout {
                     hlsl::BindTarget {
                         space: 0,
                         register,
-                        binding_array_size: (entry.count > 1).then_some(entry.count),
+                        binding_array_size: None,
                         dynamic_storage_buffer_offsets_index: None,
-                        restrict_indexing: entry.count > 1,
+                        restrict_indexing: false,
                     },
                 );
             }
         }
 
-        let immediates_target = (immediate_size != 0).then_some(hlsl::BindTarget {
-            space: 0,
-            register: next_b,
-            binding_array_size: None,
-            dynamic_storage_buffer_offsets_index: None,
-            restrict_indexing: false,
-        });
+        validate_stage_counts(vertex_counts, &limits, "vertex", "pipeline layout")?;
+        validate_stage_counts(fragment_counts, &limits, "fragment", "pipeline layout")?;
+
+        if dynamic_uniform_buffers > limits.max_dynamic_uniform_buffers_per_pipeline_layout {
+            log::error!(
+                "D3D11 pipeline layout has {dynamic_uniform_buffers} dynamic uniform buffers, at most {} are supported",
+                limits.max_dynamic_uniform_buffers_per_pipeline_layout
+            );
+            return Err(crate::DeviceError::Unexpected);
+        }
+        if dynamic_uniform_buffers > 0 && !context1_available {
+            // `ID3D11DeviceContext1` is required to express a non-zero
+            // constant-buffer window. Degrading to the plain offset-0 path
+            // would make shaders read the wrong constants.
+            log::error!(
+                "D3D11 pipeline layout has {dynamic_uniform_buffers} dynamic uniform buffers, but ID3D11DeviceContext1 is unavailable"
+            );
+            return Err(crate::DeviceError::Unexpected);
+        }
 
         let naga_options = hlsl::Options {
             shader_model: hlsl::ShaderModel::V5_0,
             binding_map,
             fake_missing_bindings: false,
             special_constants_binding: None,
-            immediates_target,
+            immediates_target: None,
             sampler_binding_mode: hlsl::SamplerBindingMode::Direct,
             ..Default::default()
         };
@@ -543,6 +789,7 @@ impl PipelineLayout {
         Ok(Self {
             bind_group_layouts,
             immediate_size,
+            limits,
             naga_options,
         })
     }
@@ -564,6 +811,286 @@ impl PipelineLayout {
             .binding_map
             .get(&naga::ResourceBinding { group, binding })
             .copied()
+    }
+
+    /// Validates that `group` can be bound at `index` with `dynamic_offsets`.
+    ///
+    /// This checks the layout identity, the dynamic-offset count and order, the
+    /// exact set of resources in the group, D3D11 register/slot ranges, uniform
+    /// buffer ranges and the `ID3D11DeviceContext1` constant-buffer window
+    /// constraints. It is public so the descriptor tests can exercise the same
+    /// path `CommandEncoder::set_bind_group` uses.
+    pub fn validate_bind_group(
+        &self,
+        index: u32,
+        group: &BindGroup,
+        dynamic_offsets: &[wgt::DynamicOffset],
+        context1_available: bool,
+    ) -> Result<(), String> {
+        let group_layout = self
+            .bind_group_layouts
+            .get(index as usize)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| format!("bind group {index} is not present in the pipeline layout"))?;
+
+        if !group_layout.same_layout(group.layout()) {
+            return Err(format!(
+                "bind group {index} does not match the bind group layout at that index"
+            ));
+        }
+
+        let mut expected_dynamic_offsets = Vec::new();
+        for entry in group_layout.entries() {
+            if entry.ty.has_dynamic_offset() {
+                expected_dynamic_offsets.push(entry.binding);
+            }
+        }
+        if group_layout.dynamic_offsets() != expected_dynamic_offsets.as_slice() {
+            return Err(format!(
+                "bind group {index} layout has an inconsistent dynamic offset order"
+            ));
+        }
+        if dynamic_offsets.len() != expected_dynamic_offsets.len() {
+            return Err(format!(
+                "bind group {index} expects {} dynamic offsets, got {}",
+                expected_dynamic_offsets.len(),
+                dynamic_offsets.len()
+            ));
+        }
+
+        let resource_count =
+            group.buffers().len() + group.samplers().len() + group.textures().len();
+        if resource_count != group_layout.entries().len() {
+            return Err(format!(
+                "bind group {index} provides {resource_count} resources for {} layout entries",
+                group_layout.entries().len()
+            ));
+        }
+
+        for entry in group_layout.entries() {
+            match entry.ty {
+                wgt::BindingType::Buffer {
+                    ty: wgt::BufferBindingType::Uniform,
+                    has_dynamic_offset,
+                    ..
+                } => {
+                    let buffer = group
+                        .buffers()
+                        .iter()
+                        .find(|buffer| buffer.binding == entry.binding)
+                        .ok_or_else(|| {
+                            format!(
+                                "bind group {index} binding {} is missing its uniform buffer",
+                                entry.binding
+                            )
+                        })?;
+                    if buffer.dynamic_offset != has_dynamic_offset {
+                        return Err(format!(
+                            "bind group {index} binding {} dynamic-offset state does not match the layout",
+                            entry.binding
+                        ));
+                    }
+
+                    let target = self.bind_target(index, entry.binding).ok_or_else(|| {
+                        format!(
+                            "bind group {index} binding {} has no flattened register",
+                            entry.binding
+                        )
+                    })?;
+                    if target.space != 0 {
+                        return Err(format!(
+                            "bind group {index} binding {} maps to register space {}, expected 0",
+                            entry.binding, target.space
+                        ));
+                    }
+                    if target.register >= D3D11_CONSTANT_BUFFER_SLOTS {
+                        return Err(format!(
+                            "bind group {index} binding {} maps to b{}, outside the {} constant-buffer slots",
+                            entry.binding, target.register, D3D11_CONSTANT_BUFFER_SLOTS
+                        ));
+                    }
+
+                    let dynamic_offset = if has_dynamic_offset {
+                        let position = expected_dynamic_offsets
+                            .iter()
+                            .position(|binding| *binding == entry.binding)
+                            .ok_or_else(|| {
+                                format!(
+                                    "bind group {index} binding {} has no dynamic offset slot",
+                                    entry.binding
+                                )
+                            })?;
+                        u64::from(dynamic_offsets[position])
+                    } else {
+                        0
+                    };
+
+                    let buffer_size = buffer.buffer.size();
+                    let base_offset = buffer.offset;
+                    if base_offset > buffer_size {
+                        return Err(format!(
+                            "bind group {index} binding {} base offset {base_offset} is outside the buffer of {buffer_size} bytes",
+                            entry.binding
+                        ));
+                    }
+                    let size = buffer
+                        .size
+                        .unwrap_or_else(|| buffer_size.saturating_sub(base_offset));
+                    if base_offset % 16 != 0 {
+                        return Err(format!(
+                            "bind group {index} binding {} base offset {base_offset} is not 16-byte aligned",
+                            entry.binding
+                        ));
+                    }
+                    if size == 0 || size % 16 != 0 {
+                        return Err(format!(
+                            "bind group {index} binding {} size {size} is not a non-zero multiple of 16 bytes",
+                            entry.binding
+                        ));
+                    }
+                    if size > self.limits.max_uniform_buffer_binding_size {
+                        return Err(format!(
+                            "bind group {index} binding {} size {size} exceeds max_uniform_buffer_binding_size {}",
+                            entry.binding, self.limits.max_uniform_buffer_binding_size
+                        ));
+                    }
+                    if has_dynamic_offset {
+                        let alignment =
+                            u64::from(self.limits.min_uniform_buffer_offset_alignment.max(1));
+                        if base_offset % alignment != 0 {
+                            return Err(format!(
+                                "bind group {index} binding {} base offset {base_offset} is not aligned to min_uniform_buffer_offset_alignment {alignment}",
+                                entry.binding
+                            ));
+                        }
+                    }
+
+                    let total_offset =
+                        base_offset.checked_add(dynamic_offset).ok_or_else(|| {
+                            format!(
+                                "bind group {index} binding {} offset overflowed",
+                                entry.binding
+                            )
+                        })?;
+                    if total_offset % 16 != 0 {
+                        return Err(format!(
+                            "bind group {index} binding {} total offset {total_offset} is not 16-byte aligned",
+                            entry.binding
+                        ));
+                    }
+                    let end = total_offset.checked_add(size).ok_or_else(|| {
+                        format!(
+                            "bind group {index} binding {} range overflowed",
+                            entry.binding
+                        )
+                    })?;
+                    if end > buffer_size {
+                        return Err(format!(
+                            "bind group {index} binding {} range {total_offset}..{end} is outside the buffer of {buffer_size} bytes",
+                            entry.binding
+                        ));
+                    }
+
+                    if total_offset != 0 {
+                        if !context1_available {
+                            return Err(format!(
+                                "bind group {index} binding {} needs offset {total_offset}, but ID3D11DeviceContext1 is unavailable",
+                                entry.binding
+                            ));
+                        }
+                        if total_offset % 256 != 0 {
+                            return Err(format!(
+                                "bind group {index} binding {} total offset {total_offset} is not a multiple of 256 bytes",
+                                entry.binding
+                            ));
+                        }
+                        let first_constant = total_offset / 16;
+                        let num_constants = size / 16;
+                        if first_constant.saturating_add(num_constants) > 4096 {
+                            return Err(format!(
+                                "bind group {index} binding {} constant window {first_constant}..{} exceeds 4096 constants",
+                                entry.binding,
+                                first_constant.saturating_add(num_constants)
+                            ));
+                        }
+                    }
+                }
+                wgt::BindingType::Texture { .. } => {
+                    let texture = group
+                        .textures()
+                        .iter()
+                        .find(|texture| texture.binding == entry.binding)
+                        .ok_or_else(|| {
+                            format!(
+                                "bind group {index} binding {} is missing its sampled texture",
+                                entry.binding
+                            )
+                        })?;
+                    let target = self.bind_target(index, entry.binding).ok_or_else(|| {
+                        format!(
+                            "bind group {index} binding {} has no flattened register",
+                            entry.binding
+                        )
+                    })?;
+                    if target.space != 0 {
+                        return Err(format!(
+                            "bind group {index} binding {} maps to register space {}, expected 0",
+                            entry.binding, target.space
+                        ));
+                    }
+                    if target.register >= D3D11_SRV_SLOTS {
+                        return Err(format!(
+                            "bind group {index} binding {} maps to t{}, outside the {} shader resource slots",
+                            entry.binding, target.register, D3D11_SRV_SLOTS
+                        ));
+                    }
+                    if texture.view.raw_srv().is_none() {
+                        return Err(format!(
+                            "bind group {index} binding {} has no shader resource view",
+                            entry.binding
+                        ));
+                    }
+                }
+                wgt::BindingType::Sampler(_) => {
+                    group
+                        .samplers()
+                        .iter()
+                        .find(|sampler| sampler.binding == entry.binding)
+                        .ok_or_else(|| {
+                            format!(
+                                "bind group {index} binding {} is missing its sampler",
+                                entry.binding
+                            )
+                        })?;
+                    let target = self.bind_target(index, entry.binding).ok_or_else(|| {
+                        format!(
+                            "bind group {index} binding {} has no flattened register",
+                            entry.binding
+                        )
+                    })?;
+                    if target.space != 0 {
+                        return Err(format!(
+                            "bind group {index} binding {} maps to register space {}, expected 0",
+                            entry.binding, target.space
+                        ));
+                    }
+                    if target.register >= D3D11_SAMPLER_SLOTS {
+                        return Err(format!(
+                            "bind group {index} binding {} maps to s{}, outside the {} sampler slots",
+                            entry.binding, target.register, D3D11_SAMPLER_SLOTS
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(format!(
+                        "bind group {index} binding {} has an unsupported binding type {:?}",
+                        entry.binding, entry.ty
+                    ));
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -729,16 +1256,20 @@ impl BindGroup {
             return Err(crate::DeviceError::Unexpected);
         }
 
+        let limits = desc.layout.limits();
+
         let mut buffers = Vec::new();
         let mut samplers = Vec::new();
         let mut textures = Vec::new();
 
         for (entry, layout) in desc.entries.iter().zip(&desc.layout.entries) {
-            if entry.binding != layout.binding || entry.count == 0 || entry.count > layout.count {
+            if entry.binding != layout.binding || entry.count != 1 || entry.count != layout.count {
                 log::error!(
-                    "D3D11 bind group entry {} does not match the layout entry {}",
+                    "D3D11 bind group entry {} (count {}) does not match the layout entry {} (count {})",
                     entry.binding,
-                    layout.binding
+                    entry.count,
+                    layout.binding,
+                    layout.count
                 );
                 return Err(crate::DeviceError::Unexpected);
             }
@@ -752,13 +1283,29 @@ impl BindGroup {
                 wgt::BindingType::Buffer {
                     ty,
                     has_dynamic_offset,
-                    ..
+                    min_binding_size,
                 } => {
+                    if ty != wgt::BufferBindingType::Uniform {
+                        log::error!(
+                            "D3D11 storage buffer bindings are not implemented yet (binding {})",
+                            layout.binding
+                        );
+                        return Err(crate::DeviceError::Unexpected);
+                    }
+
                     let bindings = desc
                         .buffers
                         .get(start..end)
                         .ok_or(crate::DeviceError::Unexpected)?;
                     for binding in bindings {
+                        if !binding.buffer.usage().contains(wgt::BufferUses::UNIFORM) {
+                            log::error!(
+                                "D3D11 uniform buffer binding {} requires UNIFORM usage",
+                                layout.binding
+                            );
+                            return Err(crate::DeviceError::Unexpected);
+                        }
+
                         let buffer_size = binding.buffer.size();
                         if binding.offset > buffer_size {
                             log::error!("D3D11 buffer binding offset is outside the buffer");
@@ -776,14 +1323,35 @@ impl BindGroup {
                             return Err(crate::DeviceError::Unexpected);
                         }
 
-                        if ty == wgt::BufferBindingType::Uniform {
-                            if binding.offset % 16 != 0
-                                || size == 0
-                                || size % 16 != 0
-                                || size > 65_536
-                            {
+                        if binding.offset % 16 != 0 || size == 0 || size % 16 != 0 {
+                            log::error!(
+                                "D3D11 uniform buffer bindings must have a 16-byte aligned offset and a non-zero 16-byte aligned size"
+                            );
+                            return Err(crate::DeviceError::Unexpected);
+                        }
+                        if size > limits.max_uniform_buffer_binding_size {
+                            log::error!(
+                                "D3D11 uniform buffer binding size {size} exceeds max_uniform_buffer_binding_size {}",
+                                limits.max_uniform_buffer_binding_size
+                            );
+                            return Err(crate::DeviceError::Unexpected);
+                        }
+                        if let Some(min_binding_size) = min_binding_size {
+                            if size < min_binding_size.get() {
                                 log::error!(
-                                    "D3D11 uniform buffer bindings must be 16-byte aligned and at most 65536 bytes"
+                                    "D3D11 uniform buffer binding size {size} is smaller than min_binding_size {}",
+                                    min_binding_size.get()
+                                );
+                                return Err(crate::DeviceError::Unexpected);
+                            }
+                        }
+                        if has_dynamic_offset {
+                            let alignment =
+                                u64::from(limits.min_uniform_buffer_offset_alignment.max(1));
+                            if binding.offset % alignment != 0 {
+                                log::error!(
+                                    "D3D11 dynamic uniform buffer base offset {} is not aligned to {alignment}",
+                                    binding.offset
                                 );
                                 return Err(crate::DeviceError::Unexpected);
                             }
@@ -793,7 +1361,10 @@ impl BindGroup {
                             binding: layout.binding,
                             buffer: binding.buffer.clone_for_binding(),
                             offset: binding.offset,
-                            size: binding.size.map(|size| size.get()),
+                            // Record the effective size even when the caller
+                            // omitted it, so bind-time validation always has an
+                            // explicit range.
+                            size: Some(size),
                             dynamic_offset: has_dynamic_offset,
                         });
                     }
@@ -1000,9 +1571,154 @@ pub struct PipelineCache;
 mod tests {
     use super::*;
 
+    fn test_limits() -> wgt::Limits {
+        // These tests do not open a device; use the contract limits for the
+        // 11_0 feature level instead.
+        crate::dx11::conv::limits_for_feature_level(
+            windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0,
+        )
+    }
+
+    fn uniform_entry(
+        binding: u32,
+        visibility: wgt::ShaderStages,
+        has_dynamic_offset: bool,
+    ) -> wgt::BindGroupLayoutEntry {
+        wgt::BindGroupLayoutEntry {
+            binding,
+            visibility,
+            ty: wgt::BindingType::Buffer {
+                ty: wgt::BufferBindingType::Uniform,
+                has_dynamic_offset,
+                min_binding_size: None,
+            },
+            count: None,
+        }
+    }
+
+    fn texture_entry(binding: u32, visibility: wgt::ShaderStages) -> wgt::BindGroupLayoutEntry {
+        wgt::BindGroupLayoutEntry {
+            binding,
+            visibility,
+            ty: wgt::BindingType::Texture {
+                sample_type: wgt::TextureSampleType::Float { filterable: true },
+                view_dimension: wgt::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        }
+    }
+
+    fn sampler_entry(binding: u32, visibility: wgt::ShaderStages) -> wgt::BindGroupLayoutEntry {
+        wgt::BindGroupLayoutEntry {
+            binding,
+            visibility,
+            ty: wgt::BindingType::Sampler(wgt::SamplerBindingType::Filtering),
+            count: None,
+        }
+    }
+
     #[test]
     fn pipeline_layout_rejects_immediates_and_accepts_none() {
-        assert!(PipelineLayout::new(Vec::new(), 0).is_ok());
-        assert!(PipelineLayout::new(Vec::new(), 4).is_err());
+        let limits = test_limits();
+        assert!(PipelineLayout::new(Vec::new(), 0, limits.clone(), false).is_ok());
+        assert!(PipelineLayout::new(Vec::new(), 4, limits, false).is_err());
+    }
+
+    #[test]
+    fn pipeline_layout_requires_context1_for_dynamic_uniforms() {
+        let limits = test_limits();
+
+        let dynamic_layout = BindGroupLayout::new(
+            &[uniform_entry(0, wgt::ShaderStages::VERTEX, true)],
+            &limits,
+        )
+        .expect("a dynamic uniform buffer is valid on its own");
+        assert!(
+            PipelineLayout::new(vec![Some(dynamic_layout.clone())], 0, limits.clone(), false,)
+                .is_err(),
+            "a dynamic uniform buffer must be rejected without ID3D11DeviceContext1"
+        );
+        assert!(
+            PipelineLayout::new(vec![Some(dynamic_layout)], 0, limits.clone(), true).is_ok(),
+            "a dynamic uniform buffer must be accepted with ID3D11DeviceContext1"
+        );
+
+        let static_layout = BindGroupLayout::new(
+            &[uniform_entry(0, wgt::ShaderStages::VERTEX, false)],
+            &limits,
+        )
+        .expect("a static uniform buffer is valid");
+        assert!(
+            PipelineLayout::new(vec![Some(static_layout)], 0, limits, false).is_ok(),
+            "static uniform buffers must not require ID3D11DeviceContext1"
+        );
+    }
+
+    #[test]
+    fn pipeline_layout_rejects_more_than_14_constant_buffer_registers() {
+        // Eight vertex-only plus eight fragment-only UBOs are within the
+        // per-stage limit of 12. However, Naga/HLSL declares every module-level
+        // global in every entry point, so the flattened `b` registers must be
+        // globally unique and D3D11 only exposes 14 constant-buffer slots per
+        // stage. 8 + 8 = 16 > 14 must be rejected even though each stage uses
+        // only 8 bindings.
+        let limits = test_limits();
+        let mut entries = Vec::new();
+        for binding in 0..8 {
+            entries.push(uniform_entry(binding, wgt::ShaderStages::VERTEX, false));
+        }
+        for binding in 8..16 {
+            entries.push(uniform_entry(binding, wgt::ShaderStages::FRAGMENT, false));
+        }
+
+        let layout = BindGroupLayout::new(&entries, &limits)
+            .expect("8 uniform buffers per stage are within the per-stage limit");
+        assert!(
+            PipelineLayout::new(vec![Some(layout)], 0, limits, false).is_err(),
+            "16 globally unique constant-buffer registers exceed the 14 D3D11 slots"
+        );
+    }
+
+    #[test]
+    fn bind_group_layout_enforces_per_stage_binding_limits() {
+        let limits = test_limits();
+
+        let twelve_uniforms: Vec<_> = (0..12)
+            .map(|binding| uniform_entry(binding, wgt::ShaderStages::VERTEX, false))
+            .collect();
+        assert!(BindGroupLayout::new(&twelve_uniforms, &limits).is_ok());
+        let thirteen_uniforms: Vec<_> = (0..13)
+            .map(|binding| uniform_entry(binding, wgt::ShaderStages::VERTEX, false))
+            .collect();
+        assert!(BindGroupLayout::new(&thirteen_uniforms, &limits).is_err());
+
+        // An entry visible to both stages counts against both stage limits.
+        let twelve_both: Vec<_> = (0..12)
+            .map(|binding| uniform_entry(binding, wgt::ShaderStages::VERTEX_FRAGMENT, false))
+            .collect();
+        assert!(BindGroupLayout::new(&twelve_both, &limits).is_ok());
+        let thirteen_both: Vec<_> = (0..13)
+            .map(|binding| uniform_entry(binding, wgt::ShaderStages::VERTEX_FRAGMENT, false))
+            .collect();
+        assert!(BindGroupLayout::new(&thirteen_both, &limits).is_err());
+
+        let sixteen_textures: Vec<_> = (0..16)
+            .map(|binding| texture_entry(binding, wgt::ShaderStages::FRAGMENT))
+            .collect();
+        assert!(BindGroupLayout::new(&sixteen_textures, &limits).is_ok());
+        let seventeen_textures: Vec<_> = (0..17)
+            .map(|binding| texture_entry(binding, wgt::ShaderStages::FRAGMENT))
+            .collect();
+        assert!(BindGroupLayout::new(&seventeen_textures, &limits).is_err());
+
+        let sixteen_samplers: Vec<_> = (0..16)
+            .map(|binding| sampler_entry(binding, wgt::ShaderStages::VERTEX))
+            .collect();
+        assert!(BindGroupLayout::new(&sixteen_samplers, &limits).is_ok());
+        let seventeen_samplers: Vec<_> = (0..17)
+            .map(|binding| sampler_entry(binding, wgt::ShaderStages::VERTEX))
+            .collect();
+        assert!(BindGroupLayout::new(&seventeen_samplers, &limits).is_err());
     }
 }

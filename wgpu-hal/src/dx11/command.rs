@@ -12,11 +12,11 @@
 //! with D3D11.1's 256-byte-aligned constant-buffer windows, the binding is
 //! rejected explicitly instead of being silently mis-bound.
 //!
-//! Push constants (`set_immediates`) remain a documented no-op until the
-//! emitter and pipeline layouts agree on a dedicated immediate constant
-//! buffer.
+//! Push constants are not implemented: `set_immediates` records an explicit
+//! encoder error so `end_encoding` rejects the command buffer instead of
+//! submitting a draw that silently reads zeros.
 
-use alloc::vec::Vec;
+use alloc::{format, string::String, vec::Vec};
 use core::{ffi::c_void, ops::Range, ptr};
 
 use windows::{
@@ -160,18 +160,6 @@ struct RenderPassState {
     sample_count: u32,
 }
 
-/// Returns the next register slot for a possibly arrayed binding.
-fn next_binding_slot(counts: &mut Vec<(u32, u32)>, binding: u32, base: u32) -> u32 {
-    if let Some(entry) = counts.iter_mut().find(|(bound, _)| *bound == binding) {
-        let slot = base + entry.1;
-        entry.1 += 1;
-        slot
-    } else {
-        counts.push((binding, 1));
-        base
-    }
-}
-
 /// Command buffer type, which also acts as the command encoder.
 ///
 /// Keeping a single type for both roles follows the structure of the noop
@@ -189,6 +177,9 @@ pub struct CommandBuffer {
     sample_mask: u32,
     stencil_reference: u32,
     render_pass: Option<RenderPassState>,
+    /// First explicit encoding error. `end_encoding` reports it instead of
+    /// producing a command buffer that would submit partial state.
+    error: Option<String>,
 }
 
 impl CommandBuffer {
@@ -208,6 +199,16 @@ impl CommandBuffer {
             sample_mask: u32::MAX,
             stencil_reference: 0,
             render_pass: None,
+            error: None,
+        }
+    }
+
+    /// Records the first explicit encoding error so [`crate::CommandEncoder::end_encoding`]
+    /// rejects the command buffer instead of submitting partial state.
+    fn encoder_error(&mut self, message: String) {
+        log::error!("D3D11 command encoding: {message}");
+        if self.error.is_none() {
+            self.error = Some(message);
         }
     }
 }
@@ -216,12 +217,19 @@ impl crate::CommandEncoder for CommandBuffer {
     type A = Api;
 
     unsafe fn begin_encoding(&mut self, _label: crate::Label) -> Result<(), crate::DeviceError> {
+        self.error = None;
         Ok(())
     }
 
-    unsafe fn discard_encoding(&mut self) {}
+    unsafe fn discard_encoding(&mut self) {
+        self.error = None;
+    }
 
     unsafe fn end_encoding(&mut self) -> Result<CommandBuffer, crate::DeviceError> {
+        if let Some(error) = &self.error {
+            log::error!("D3D11 command encoding failed: {error}");
+            return Err(crate::DeviceError::Unexpected);
+        }
         // The supported commands have already been executed on the immediate
         // context, so the returned buffer only has to carry the context forward
         // for `Queue::submit` (which currently just flushes).
@@ -1068,62 +1076,62 @@ impl crate::CommandEncoder for CommandBuffer {
         group: &BindGroup,
         dynamic_offsets: &[wgt::DynamicOffset],
     ) {
-        let Some(Some(group_layout)) = layout.bind_group_layouts().get(index as usize) else {
-            log::error!("D3D11 set_bind_group called for missing bind group {index}");
-            return;
-        };
-        if dynamic_offsets.len() != group_layout.dynamic_offsets().len() {
-            log::error!(
-                "D3D11 bind group {index} expects {} dynamic offsets, got {}",
-                group_layout.dynamic_offsets().len(),
-                dynamic_offsets.len()
-            );
+        // Validate the whole group before touching the D3D11 context. A failed
+        // group must leave no partial binding state behind.
+        if let Err(error) =
+            layout.validate_bind_group(index, group, dynamic_offsets, self.context1.is_some())
+        {
+            self.encoder_error(format!("set_bind_group group {index}: {error}"));
             return;
         }
 
-        let mut array_counts = Vec::new();
+        let Some(group_layout) = layout
+            .bind_group_layouts()
+            .get(index as usize)
+            .and_then(|layout| layout.as_ref())
+        else {
+            self.encoder_error(format!(
+                "set_bind_group called for missing bind group {index}"
+            ));
+            return;
+        };
 
         for bound in group.buffers() {
             let Some(entry) = group_layout.entry(bound.binding) else {
-                log::error!(
-                    "D3D11 bind group has no layout entry for binding {}",
+                self.encoder_error(format!(
+                    "bind group {index} has no layout entry for binding {}",
                     bound.binding
-                );
-                continue;
+                ));
+                return;
             };
-            let (ty, has_dynamic_offset) = match entry.ty {
+            let has_dynamic_offset = match entry.ty {
                 wgt::BindingType::Buffer {
-                    ty,
+                    ty: wgt::BufferBindingType::Uniform,
                     has_dynamic_offset,
                     ..
-                } => (ty, has_dynamic_offset),
+                } => has_dynamic_offset,
                 _ => {
-                    log::error!(
-                        "D3D11 binding {} is not a buffer binding in the bind group layout",
+                    self.encoder_error(format!(
+                        "binding {} is not a uniform buffer in the bind group layout",
                         bound.binding
-                    );
-                    continue;
+                    ));
+                    return;
                 }
             };
-            if ty != wgt::BufferBindingType::Uniform {
-                log::error!(
-                    "D3D11 storage buffer binding {} is not implemented yet; only uniform buffers can be bound",
-                    bound.binding
-                );
-                continue;
-            }
 
             let Some(target) = layout.bind_target(index, bound.binding) else {
-                log::error!(
-                    "D3D11 pipeline layout has no register for group {index} binding {}",
+                self.encoder_error(format!(
+                    "pipeline layout has no register for group {index} binding {}",
                     bound.binding
-                );
-                continue;
+                ));
+                return;
             };
-            let slot = next_binding_slot(&mut array_counts, bound.binding, target.register);
+            let slot = target.register;
             if slot >= Direct3D11::D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT {
-                log::error!("D3D11 constant buffer register {slot} is outside the supported range");
-                continue;
+                self.encoder_error(format!(
+                    "constant buffer register {slot} is outside the supported range"
+                ));
+                return;
             }
 
             let dynamic_offset = if has_dynamic_offset {
@@ -1132,47 +1140,47 @@ impl crate::CommandEncoder for CommandBuffer {
                     .iter()
                     .position(|binding| *binding == bound.binding)
                 else {
-                    log::error!(
-                        "D3D11 dynamic binding {} has no dynamic offset slot",
+                    self.encoder_error(format!(
+                        "dynamic binding {} has no dynamic offset slot",
                         bound.binding
-                    );
-                    continue;
+                    ));
+                    return;
                 };
                 let Some(offset) = dynamic_offsets.get(position) else {
-                    log::error!(
-                        "D3D11 dynamic binding {} is missing its dynamic offset",
+                    self.encoder_error(format!(
+                        "dynamic binding {} is missing its dynamic offset",
                         bound.binding
-                    );
-                    continue;
+                    ));
+                    return;
                 };
-                *offset as u64
+                u64::from(*offset)
             } else {
                 0
             };
 
             let Some(offset) = bound.offset.checked_add(dynamic_offset) else {
-                log::error!("D3D11 uniform buffer offset overflowed");
-                continue;
+                self.encoder_error("uniform buffer offset overflowed".to_owned());
+                return;
             };
             let size = bound
                 .size
-                .unwrap_or_else(|| bound.buffer.size().saturating_sub(offset));
+                .unwrap_or_else(|| bound.buffer.size().saturating_sub(bound.offset));
             let Some(end) = offset.checked_add(size) else {
-                log::error!("D3D11 uniform buffer range overflowed");
-                continue;
+                self.encoder_error("uniform buffer range overflowed".to_owned());
+                return;
             };
             if size == 0 || end > bound.buffer.size() {
-                log::error!(
-                    "D3D11 uniform buffer range {offset}..{end} is outside the buffer of {} bytes",
+                self.encoder_error(format!(
+                    "uniform buffer range {offset}..{end} is outside the buffer of {} bytes",
                     bound.buffer.size()
-                );
-                continue;
+                ));
+                return;
             }
             if offset % 16 != 0 || size % 16 != 0 {
-                log::error!(
-                    "D3D11 uniform buffer ranges must be 16-byte aligned, got offset {offset} and size {size}"
-                );
-                continue;
+                self.encoder_error(format!(
+                    "uniform buffer ranges must be 16-byte aligned, got offset {offset} and size {size}"
+                ));
+                return;
             }
 
             let buffers = [Some(bound.buffer.raw().clone())];
@@ -1187,41 +1195,44 @@ impl crate::CommandEncoder for CommandBuffer {
             }
 
             let Some(context1) = self.context1.as_ref() else {
-                log::error!(
-                    "D3D11 constant buffer binding {} has offset {offset}, but ID3D11DeviceContext1 is unavailable",
+                self.encoder_error(format!(
+                    "constant buffer binding {} has offset {offset}, but ID3D11DeviceContext1 is unavailable",
                     bound.binding
-                );
-                continue;
+                ));
+                return;
             };
             // D3D11.1 expresses constant buffer windows in 16-constant
-            // (256-byte) units. Reject windows that cannot be represented
-            // instead of rounding outside the WebGPU binding range.
-            if offset % 256 != 0 || size % 256 != 0 {
-                log::error!(
-                    "D3D11 constant buffer offsets must be 256-byte aligned, got offset {offset} and size {size}"
-                );
-                continue;
+            // (256-byte) units, so the total offset must be 256-byte aligned.
+            // The window length is expressed in 16-byte constants, so the
+            // binding size only has to be a multiple of 16, not 256.
+            if offset % 256 != 0 {
+                self.encoder_error(format!(
+                    "constant buffer total offset must be 256-byte aligned, got {offset}"
+                ));
+                return;
             }
             let first_constant = match u32::try_from(offset / 16) {
                 Ok(value) => value,
                 Err(_) => {
-                    log::error!("D3D11 constant buffer offset {offset} does not fit in u32");
-                    continue;
+                    self.encoder_error(format!(
+                        "constant buffer offset {offset} does not fit in u32"
+                    ));
+                    return;
                 }
             };
             let num_constants = match u32::try_from(size / 16) {
                 Ok(value) => value,
                 Err(_) => {
-                    log::error!("D3D11 constant buffer size {size} does not fit in u32");
-                    continue;
+                    self.encoder_error(format!("constant buffer size {size} does not fit in u32"));
+                    return;
                 }
             };
             let end_constant = first_constant.saturating_add(num_constants);
             if end_constant > 4096 {
-                log::error!(
-                    "D3D11 constant buffer window {first_constant}..{end_constant} exceeds 4096 constants"
-                );
-                continue;
+                self.encoder_error(format!(
+                    "constant buffer window {first_constant}..{end_constant} exceeds 4096 constants"
+                ));
+                return;
             }
 
             let first_constants = [first_constant];
@@ -1252,37 +1263,39 @@ impl crate::CommandEncoder for CommandBuffer {
 
         for bound in group.textures() {
             let Some(entry) = group_layout.entry(bound.binding) else {
-                log::error!(
-                    "D3D11 bind group has no layout entry for binding {}",
+                self.encoder_error(format!(
+                    "bind group {index} has no layout entry for binding {}",
                     bound.binding
-                );
-                continue;
+                ));
+                return;
             };
             if !matches!(entry.ty, wgt::BindingType::Texture { .. }) {
-                log::error!(
-                    "D3D11 binding {} is not a texture binding in the bind group layout",
+                self.encoder_error(format!(
+                    "binding {} is not a texture binding in the bind group layout",
                     bound.binding
-                );
-                continue;
+                ));
+                return;
             }
             let Some(target) = layout.bind_target(index, bound.binding) else {
-                log::error!(
-                    "D3D11 pipeline layout has no register for group {index} binding {}",
+                self.encoder_error(format!(
+                    "pipeline layout has no register for group {index} binding {}",
                     bound.binding
-                );
-                continue;
+                ));
+                return;
             };
-            let slot = next_binding_slot(&mut array_counts, bound.binding, target.register);
+            let slot = target.register;
             if slot >= Direct3D11::D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT {
-                log::error!("D3D11 shader resource register {slot} is outside the supported range");
-                continue;
+                self.encoder_error(format!(
+                    "shader resource register {slot} is outside the supported range"
+                ));
+                return;
             }
             let Some(srv) = bound.view.raw_srv() else {
-                log::error!(
-                    "D3D11 texture binding {} has no shader resource view",
+                self.encoder_error(format!(
+                    "texture binding {} has no shader resource view",
                     bound.binding
-                );
-                continue;
+                ));
+                return;
             };
             let views = [Some(srv.clone())];
             if entry.visibility.contains(wgt::ShaderStages::VERTEX) {
@@ -1295,30 +1308,32 @@ impl crate::CommandEncoder for CommandBuffer {
 
         for bound in group.samplers() {
             let Some(entry) = group_layout.entry(bound.binding) else {
-                log::error!(
-                    "D3D11 bind group has no layout entry for binding {}",
+                self.encoder_error(format!(
+                    "bind group {index} has no layout entry for binding {}",
                     bound.binding
-                );
-                continue;
+                ));
+                return;
             };
             if !matches!(entry.ty, wgt::BindingType::Sampler(_)) {
-                log::error!(
-                    "D3D11 binding {} is not a sampler binding in the bind group layout",
+                self.encoder_error(format!(
+                    "binding {} is not a sampler binding in the bind group layout",
                     bound.binding
-                );
-                continue;
+                ));
+                return;
             }
             let Some(target) = layout.bind_target(index, bound.binding) else {
-                log::error!(
-                    "D3D11 pipeline layout has no register for group {index} binding {}",
+                self.encoder_error(format!(
+                    "pipeline layout has no register for group {index} binding {}",
                     bound.binding
-                );
-                continue;
+                ));
+                return;
             };
-            let slot = next_binding_slot(&mut array_counts, bound.binding, target.register);
+            let slot = target.register;
             if slot >= Direct3D11::D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT {
-                log::error!("D3D11 sampler register {slot} is outside the supported range");
-                continue;
+                self.encoder_error(format!(
+                    "sampler register {slot} is outside the supported range"
+                ));
+                return;
             }
             let samplers = [Some(bound.sampler.raw().clone())];
             if entry.visibility.contains(wgt::ShaderStages::VERTEX) {
@@ -1330,15 +1345,14 @@ impl crate::CommandEncoder for CommandBuffer {
         }
     }
 
-    unsafe fn set_immediates(
-        &mut self,
-        _layout: &PipelineLayout,
-        _offset_bytes: u32,
-        _data: &[u32],
-    ) {
-        // Push constants are not bound yet. Pipeline layouts still reserve a
-        // register for them, so shaders using `set_immediates` will read zeros
-        // until a dedicated immediate constant buffer is implemented.
+    unsafe fn set_immediates(&mut self, _layout: &PipelineLayout, offset_bytes: u32, data: &[u32]) {
+        // Push constants are not advertised (`max_immediate_size` is zero) and
+        // no layout should make this path reachable. If it is called anyway,
+        // fail the encoder instead of silently leaving zeros in the shader.
+        self.encoder_error(format!(
+            "push constants are not supported (offset {offset_bytes}, {} words)",
+            data.len()
+        ));
     }
 
     unsafe fn insert_debug_marker(&mut self, _label: &str) {}

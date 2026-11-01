@@ -9,7 +9,7 @@ use alloc::{ffi::CString, string::ToString as _, vec::Vec};
 use core::{fmt, ptr::NonNull};
 
 use windows::{
-    core::PCSTR,
+    core::{Interface as _, PCSTR},
     Win32::Graphics::{Direct3D, Direct3D11, Dxgi},
 };
 
@@ -1185,7 +1185,7 @@ impl crate::Device for Device {
         &self,
         desc: &crate::BindGroupLayoutDescriptor,
     ) -> Result<BindGroupLayout, crate::DeviceError> {
-        BindGroupLayout::new(desc.entries)
+        BindGroupLayout::new(desc.entries, &self.limits)
     }
 
     unsafe fn destroy_bind_group_layout(&self, bg_layout: BindGroupLayout) {
@@ -1204,7 +1204,14 @@ impl crate::Device for Device {
                 None => None,
             })
             .collect();
-        PipelineLayout::new(bind_group_layouts, desc.immediate_size)
+        PipelineLayout::new(
+            bind_group_layouts,
+            desc.immediate_size,
+            self.limits.clone(),
+            self.raw_context
+                .cast::<Direct3D11::ID3D11DeviceContext1>()
+                .is_ok(),
+        )
     }
 
     unsafe fn destroy_pipeline_layout(&self, pipeline_layout: PipelineLayout) {
