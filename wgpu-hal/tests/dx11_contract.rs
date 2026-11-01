@@ -1302,12 +1302,11 @@ fn negative_tests(
                     },
                 )
             };
-            if let Err(error) = maybe_view {
-                failures.push(format!(
+            match maybe_view {
+                Ok(view) => unsafe { device.destroy_texture_view(view) },
+                Err(error) => failures.push(format!(
                     "{label}: create_texture_view(TextureDimension::D3) failed: {error:?}"
-                ));
-            } else if let Ok(view) = maybe_view {
-                unsafe { device.destroy_texture_view(view) };
+                )),
             }
             unsafe { device.destroy_texture(volume) };
         }
