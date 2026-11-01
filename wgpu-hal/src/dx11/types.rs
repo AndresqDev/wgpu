@@ -340,7 +340,7 @@ impl Sampler {
 }
 
 /// A normalized entry in a [`BindGroupLayout`].
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BindGroupLayoutEntry {
     pub binding: u32,
     pub visibility: wgt::ShaderStages,

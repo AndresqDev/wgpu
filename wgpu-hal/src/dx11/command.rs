@@ -16,7 +16,7 @@
 //! encoder error so `end_encoding` rejects the command buffer instead of
 //! submitting a draw that silently reads zeros.
 
-use alloc::{format, string::String, vec::Vec};
+use alloc::{borrow::ToOwned, format, string::String, vec::Vec};
 use core::{ffi::c_void, ops::Range, ptr};
 
 use windows::{
