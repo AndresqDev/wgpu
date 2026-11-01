@@ -491,8 +491,8 @@ impl crate::CommandEncoder for CommandBuffer {
     ) where
         T: Iterator<Item = crate::TextureCopy>,
     {
-        if src.dimension() == wgt::TextureDimension::D3
-            || dst.dimension() == wgt::TextureDimension::D3
+        if src.dimension() != wgt::TextureDimension::D2
+            || dst.dimension() != wgt::TextureDimension::D2
         {
             log::debug!("D3D11 volume texture copies are not implemented; skipping");
             return;
@@ -738,8 +738,8 @@ impl crate::CommandEncoder for CommandBuffer {
     ) where
         T: Iterator<Item = crate::BufferTextureCopy>,
     {
-        if src.dimension() == wgt::TextureDimension::D3 {
-            log::debug!("D3D11 volume texture readback is not implemented; skipping");
+        if src.dimension() != wgt::TextureDimension::D2 {
+            log::debug!("D3D11 non-2D texture readback is not implemented; skipping");
             return;
         }
         let format = src.format();
