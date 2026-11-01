@@ -6,15 +6,15 @@ use core::{
 
 use windows::Win32::{
     Foundation,
-    Graphics::{Direct3D11, Dxgi},
+    Graphics::{Direct3D, Direct3D11, Dxgi},
 };
 
 /// Placeholder for every GPU resource type that is not implemented yet.
 ///
-/// Buffers, textures, texture views, samplers and bind group objects have
-/// concrete wrappers below. This type remains as the placeholder used by
-/// render/compute pipelines, query sets and acceleration structures until
-/// those milestones land.
+/// Buffers, textures, texture views, samplers, bind group objects and render
+/// pipelines have concrete wrappers below. This type remains as the
+/// placeholder used by compute pipelines, query sets and acceleration
+/// structures until those milestones land.
 #[derive(Debug)]
 pub struct Resource;
 
@@ -536,6 +536,116 @@ impl PipelineLayout {
     }
 }
 
+/// A D3D11 render pipeline.
+///
+/// D3D11 has no monolithic pipeline state object. This wrapper keeps the shader
+/// objects, input layout and fixed-function state objects that
+/// [`crate::Device::create_render_pipeline`] created. Binding the pipeline
+/// applies them to the immediate context.
+#[derive(Debug)]
+pub struct RenderPipeline {
+    label: Option<String>,
+    vertex_shader: Direct3D11::ID3D11VertexShader,
+    pixel_shader: Option<Direct3D11::ID3D11PixelShader>,
+    input_layout: Option<Direct3D11::ID3D11InputLayout>,
+    rasterizer_state: Direct3D11::ID3D11RasterizerState,
+    depth_stencil_state: Direct3D11::ID3D11DepthStencilState,
+    blend_state: Direct3D11::ID3D11BlendState,
+    topology: Direct3D::D3D_PRIMITIVE_TOPOLOGY,
+    vertex_strides: Vec<Option<u32>>,
+    color_formats: Vec<Option<Dxgi::Common::DXGI_FORMAT>>,
+    depth_format: Option<Dxgi::Common::DXGI_FORMAT>,
+    sample_count: u32,
+    sample_mask: u32,
+}
+
+impl RenderPipeline {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        label: Option<String>,
+        vertex_shader: Direct3D11::ID3D11VertexShader,
+        pixel_shader: Option<Direct3D11::ID3D11PixelShader>,
+        input_layout: Option<Direct3D11::ID3D11InputLayout>,
+        rasterizer_state: Direct3D11::ID3D11RasterizerState,
+        depth_stencil_state: Direct3D11::ID3D11DepthStencilState,
+        blend_state: Direct3D11::ID3D11BlendState,
+        topology: Direct3D::D3D_PRIMITIVE_TOPOLOGY,
+        vertex_strides: Vec<Option<u32>>,
+        color_formats: Vec<Option<Dxgi::Common::DXGI_FORMAT>>,
+        depth_format: Option<Dxgi::Common::DXGI_FORMAT>,
+        sample_count: u32,
+        sample_mask: u32,
+    ) -> Self {
+        Self {
+            label,
+            vertex_shader,
+            pixel_shader,
+            input_layout,
+            rasterizer_state,
+            depth_stencil_state,
+            blend_state,
+            topology,
+            vertex_strides,
+            color_formats,
+            depth_format,
+            sample_count,
+            sample_mask,
+        }
+    }
+
+    pub fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+
+    pub(crate) fn raw_vertex_shader(&self) -> &Direct3D11::ID3D11VertexShader {
+        &self.vertex_shader
+    }
+
+    pub(crate) fn raw_pixel_shader(&self) -> Option<&Direct3D11::ID3D11PixelShader> {
+        self.pixel_shader.as_ref()
+    }
+
+    pub(crate) fn raw_input_layout(&self) -> Option<&Direct3D11::ID3D11InputLayout> {
+        self.input_layout.as_ref()
+    }
+
+    pub(crate) fn raw_rasterizer_state(&self) -> &Direct3D11::ID3D11RasterizerState {
+        &self.rasterizer_state
+    }
+
+    pub(crate) fn raw_depth_stencil_state(&self) -> &Direct3D11::ID3D11DepthStencilState {
+        &self.depth_stencil_state
+    }
+
+    pub(crate) fn raw_blend_state(&self) -> &Direct3D11::ID3D11BlendState {
+        &self.blend_state
+    }
+
+    pub fn topology(&self) -> Direct3D::D3D_PRIMITIVE_TOPOLOGY {
+        self.topology
+    }
+
+    pub fn vertex_strides(&self) -> &[Option<u32>] {
+        &self.vertex_strides
+    }
+
+    pub fn color_formats(&self) -> &[Option<Dxgi::Common::DXGI_FORMAT>] {
+        &self.color_formats
+    }
+
+    pub fn depth_format(&self) -> Option<Dxgi::Common::DXGI_FORMAT> {
+        self.depth_format
+    }
+
+    pub fn sample_count(&self) -> u32 {
+        self.sample_count
+    }
+
+    pub fn sample_mask(&self) -> u32 {
+        self.sample_mask
+    }
+}
+
 #[derive(Debug)]
 pub struct BoundBuffer {
     pub binding: u32,
@@ -560,8 +670,8 @@ pub struct BoundTexture {
 /// CPU-side bind group.
 ///
 /// The group keeps the resources alive and records where each binding lives.
-/// Binding the group to the immediate context is intentionally left to the
-/// render/compute pipeline milestone.
+/// [`crate::CommandEncoder::set_bind_group`] maps these bindings to the D3D11
+/// registers assigned by the pipeline layout.
 #[derive(Debug)]
 pub struct BindGroup {
     label: Option<String>,

@@ -184,6 +184,151 @@ pub fn map_border_color(color: wgt::SamplerBorderColor) -> [f32; 4] {
     }
 }
 
+/// Maps a WebGPU vertex format to a DXGI format usable in an input layout.
+///
+/// 64-bit vertex attributes are not supported by this backend yet.
+pub fn map_vertex_format(format: wgt::VertexFormat) -> Option<Dxgi::Common::DXGI_FORMAT> {
+    use wgt::VertexFormat as Vf;
+    use Dxgi::Common::*;
+
+    Some(match format {
+        Vf::Uint8 => DXGI_FORMAT_R8_UINT,
+        Vf::Uint8x2 => DXGI_FORMAT_R8G8_UINT,
+        Vf::Uint8x4 => DXGI_FORMAT_R8G8B8A8_UINT,
+        Vf::Sint8 => DXGI_FORMAT_R8_SINT,
+        Vf::Sint8x2 => DXGI_FORMAT_R8G8_SINT,
+        Vf::Sint8x4 => DXGI_FORMAT_R8G8B8A8_SINT,
+        Vf::Unorm8 => DXGI_FORMAT_R8_UNORM,
+        Vf::Unorm8x2 => DXGI_FORMAT_R8G8_UNORM,
+        Vf::Unorm8x4 => DXGI_FORMAT_R8G8B8A8_UNORM,
+        Vf::Snorm8 => DXGI_FORMAT_R8_SNORM,
+        Vf::Snorm8x2 => DXGI_FORMAT_R8G8_SNORM,
+        Vf::Snorm8x4 => DXGI_FORMAT_R8G8B8A8_SNORM,
+        Vf::Uint16 => DXGI_FORMAT_R16_UINT,
+        Vf::Uint16x2 => DXGI_FORMAT_R16G16_UINT,
+        Vf::Uint16x4 => DXGI_FORMAT_R16G16B16A16_UINT,
+        Vf::Sint16 => DXGI_FORMAT_R16_SINT,
+        Vf::Sint16x2 => DXGI_FORMAT_R16G16_SINT,
+        Vf::Sint16x4 => DXGI_FORMAT_R16G16B16A16_SINT,
+        Vf::Unorm16 => DXGI_FORMAT_R16_UNORM,
+        Vf::Unorm16x2 => DXGI_FORMAT_R16G16_UNORM,
+        Vf::Unorm16x4 => DXGI_FORMAT_R16G16B16A16_UNORM,
+        Vf::Snorm16 => DXGI_FORMAT_R16_SNORM,
+        Vf::Snorm16x2 => DXGI_FORMAT_R16G16_SNORM,
+        Vf::Snorm16x4 => DXGI_FORMAT_R16G16B16A16_SNORM,
+        Vf::Float16 => DXGI_FORMAT_R16_FLOAT,
+        Vf::Float16x2 => DXGI_FORMAT_R16G16_FLOAT,
+        Vf::Float16x4 => DXGI_FORMAT_R16G16B16A16_FLOAT,
+        Vf::Float32 => DXGI_FORMAT_R32_FLOAT,
+        Vf::Float32x2 => DXGI_FORMAT_R32G32_FLOAT,
+        Vf::Float32x3 => DXGI_FORMAT_R32G32B32_FLOAT,
+        Vf::Float32x4 => DXGI_FORMAT_R32G32B32A32_FLOAT,
+        Vf::Uint32 => DXGI_FORMAT_R32_UINT,
+        Vf::Uint32x2 => DXGI_FORMAT_R32G32_UINT,
+        Vf::Uint32x3 => DXGI_FORMAT_R32G32B32_UINT,
+        Vf::Uint32x4 => DXGI_FORMAT_R32G32B32A32_UINT,
+        Vf::Sint32 => DXGI_FORMAT_R32_SINT,
+        Vf::Sint32x2 => DXGI_FORMAT_R32G32_SINT,
+        Vf::Sint32x3 => DXGI_FORMAT_R32G32B32_SINT,
+        Vf::Sint32x4 => DXGI_FORMAT_R32G32B32A32_SINT,
+        Vf::Unorm10_10_10_2 => DXGI_FORMAT_R10G10B10A2_UNORM,
+        Vf::Unorm8x4Bgra => DXGI_FORMAT_B8G8R8A8_UNORM,
+        Vf::Float64 | Vf::Float64x2 | Vf::Float64x3 | Vf::Float64x4 => return None,
+    })
+}
+
+/// Maps a WebGPU index format to a DXGI format for `IASetIndexBuffer`.
+pub fn map_index_format(format: wgt::IndexFormat) -> Dxgi::Common::DXGI_FORMAT {
+    match format {
+        wgt::IndexFormat::Uint16 => Dxgi::Common::DXGI_FORMAT_R16_UINT,
+        wgt::IndexFormat::Uint32 => Dxgi::Common::DXGI_FORMAT_R32_UINT,
+    }
+}
+
+/// Maps a WebGPU primitive topology to a D3D11 primitive topology.
+pub fn map_primitive_topology(
+    topology: wgt::PrimitiveTopology,
+) -> Direct3D::D3D_PRIMITIVE_TOPOLOGY {
+    use wgt::PrimitiveTopology as Pt;
+
+    match topology {
+        Pt::PointList => Direct3D::D3D_PRIMITIVE_TOPOLOGY_POINTLIST,
+        Pt::LineList => Direct3D::D3D_PRIMITIVE_TOPOLOGY_LINELIST,
+        Pt::LineStrip => Direct3D::D3D_PRIMITIVE_TOPOLOGY_LINESTRIP,
+        Pt::TriangleList => Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+        Pt::TriangleStrip => Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
+    }
+}
+
+/// Maps a WebGPU blend factor, rejecting dual-source blend factors.
+///
+/// `is_alpha` selects the alpha equivalent for factors that use the source or
+/// destination color in the color equation.
+pub fn map_blend_factor(
+    factor: wgt::BlendFactor,
+    is_alpha: bool,
+) -> Option<Direct3D11::D3D11_BLEND> {
+    use wgt::BlendFactor as Bf;
+
+    Some(match factor {
+        Bf::Zero => Direct3D11::D3D11_BLEND_ZERO,
+        Bf::One => Direct3D11::D3D11_BLEND_ONE,
+        Bf::Src if is_alpha => Direct3D11::D3D11_BLEND_SRC_ALPHA,
+        Bf::Src => Direct3D11::D3D11_BLEND_SRC_COLOR,
+        Bf::OneMinusSrc if is_alpha => Direct3D11::D3D11_BLEND_INV_SRC_ALPHA,
+        Bf::OneMinusSrc => Direct3D11::D3D11_BLEND_INV_SRC_COLOR,
+        Bf::Dst if is_alpha => Direct3D11::D3D11_BLEND_DEST_ALPHA,
+        Bf::Dst => Direct3D11::D3D11_BLEND_DEST_COLOR,
+        Bf::OneMinusDst if is_alpha => Direct3D11::D3D11_BLEND_INV_DEST_ALPHA,
+        Bf::OneMinusDst => Direct3D11::D3D11_BLEND_INV_DEST_COLOR,
+        Bf::SrcAlpha => Direct3D11::D3D11_BLEND_SRC_ALPHA,
+        Bf::OneMinusSrcAlpha => Direct3D11::D3D11_BLEND_INV_SRC_ALPHA,
+        Bf::DstAlpha => Direct3D11::D3D11_BLEND_DEST_ALPHA,
+        Bf::OneMinusDstAlpha => Direct3D11::D3D11_BLEND_INV_DEST_ALPHA,
+        Bf::Constant => Direct3D11::D3D11_BLEND_BLEND_FACTOR,
+        Bf::OneMinusConstant => Direct3D11::D3D11_BLEND_INV_BLEND_FACTOR,
+        Bf::SrcAlphaSaturated => Direct3D11::D3D11_BLEND_SRC_ALPHA_SAT,
+        Bf::Src1 | Bf::OneMinusSrc1 | Bf::Src1Alpha | Bf::OneMinusSrc1Alpha => return None,
+    })
+}
+
+/// Maps a WebGPU blend operation to a D3D11 blend operation.
+pub fn map_blend_operation(operation: wgt::BlendOperation) -> Direct3D11::D3D11_BLEND_OP {
+    match operation {
+        wgt::BlendOperation::Add => Direct3D11::D3D11_BLEND_OP_ADD,
+        wgt::BlendOperation::Subtract => Direct3D11::D3D11_BLEND_OP_SUBTRACT,
+        wgt::BlendOperation::ReverseSubtract => Direct3D11::D3D11_BLEND_OP_REV_SUBTRACT,
+        wgt::BlendOperation::Min => Direct3D11::D3D11_BLEND_OP_MIN,
+        wgt::BlendOperation::Max => Direct3D11::D3D11_BLEND_OP_MAX,
+    }
+}
+
+/// Maps a WebGPU stencil operation to a D3D11 stencil operation.
+pub fn map_stencil_operation(operation: wgt::StencilOperation) -> Direct3D11::D3D11_STENCIL_OP {
+    use wgt::StencilOperation as So;
+
+    match operation {
+        So::Keep => Direct3D11::D3D11_STENCIL_OP_KEEP,
+        So::Zero => Direct3D11::D3D11_STENCIL_OP_ZERO,
+        So::Replace => Direct3D11::D3D11_STENCIL_OP_REPLACE,
+        So::IncrementClamp => Direct3D11::D3D11_STENCIL_OP_INCR_SAT,
+        So::IncrementWrap => Direct3D11::D3D11_STENCIL_OP_INCR,
+        So::DecrementClamp => Direct3D11::D3D11_STENCIL_OP_DECR_SAT,
+        So::DecrementWrap => Direct3D11::D3D11_STENCIL_OP_DECR,
+        So::Invert => Direct3D11::D3D11_STENCIL_OP_INVERT,
+    }
+}
+
+/// Maps one stencil face state to its D3D11 description.
+pub fn map_stencil_face(face: &wgt::StencilFaceState) -> Direct3D11::D3D11_DEPTH_STENCILOP_DESC {
+    Direct3D11::D3D11_DEPTH_STENCILOP_DESC {
+        StencilFailOp: map_stencil_operation(face.fail_op),
+        StencilDepthFailOp: map_stencil_operation(face.depth_fail_op),
+        StencilPassOp: map_stencil_operation(face.pass_op),
+        StencilFunc: map_comparison(face.compare),
+    }
+}
+
 /// Feature-dependent limits.
 ///
 /// These are deliberately conservative. The actual D3D11 limits are queried
