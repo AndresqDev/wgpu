@@ -166,8 +166,12 @@ fn dx11_query_pool_rotates_under_pressure() {
         completed >= 32,
         "get_fence_value returned {completed} after value 32 completed"
     );
-    println!("value 32 completed after rotation; completed value = {completed}");
+    println!("value 32 completed after pool pressure; completed value = {completed}");
 
+    // WARP may retire every marker before the 100 ms rotation timeout, in which
+    // case the pool is reused without entering the rotation branch. This test
+    // still proves that submitting more values than slots succeeds and stays
+    // bounded; the separate wait-timeout unit test covers the deadline path.
     unsafe { device.destroy_fence(fence) };
 }
 
