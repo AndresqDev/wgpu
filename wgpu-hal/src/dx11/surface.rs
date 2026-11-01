@@ -8,6 +8,7 @@
 //! Window resizing is not handled yet: [`crate::Surface::configure`] recreates
 //! the swap chain, but there is no automatic `ResizeBuffers` path.
 
+use alloc::vec::Vec;
 use core::{fmt, time::Duration};
 
 use parking_lot::Mutex;

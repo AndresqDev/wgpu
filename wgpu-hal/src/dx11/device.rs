@@ -10,7 +10,7 @@ use core::fmt;
 
 use windows::Win32::Graphics::{Direct3D, Direct3D11};
 
-use super::{Api, CommandBuffer, Fence, PipelineCache, Resource, ShaderModule};
+use super::{Api, CommandBuffer, Fence, PipelineCache, Resource, ShaderModule, TextureView};
 
 /// An open D3D11 device.
 pub struct Device {
@@ -107,11 +107,11 @@ impl crate::Device for Device {
         &self,
         _texture: &Resource,
         _desc: &crate::TextureViewDescriptor,
-    ) -> Result<Resource, crate::DeviceError> {
+    ) -> Result<TextureView, crate::DeviceError> {
         unimplemented!("D3D11 texture view creation is not implemented yet")
     }
 
-    unsafe fn destroy_texture_view(&self, _view: Resource) {}
+    unsafe fn destroy_texture_view(&self, _view: TextureView) {}
 
     unsafe fn create_sampler(
         &self,
@@ -149,7 +149,7 @@ impl crate::Device for Device {
 
     unsafe fn create_bind_group(
         &self,
-        _desc: &crate::BindGroupDescriptor<Resource, Resource, Resource, Resource, Resource>,
+        _desc: &crate::BindGroupDescriptor<'_, Resource, Resource, Resource, TextureView, Resource>,
     ) -> Result<Resource, crate::DeviceError> {
         unimplemented!("D3D11 bind group creation is not implemented yet")
     }
