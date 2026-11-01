@@ -32,6 +32,7 @@ use wgpu_hal::{
     TextureFormatCapabilities as Tfc,
 };
 use wgpu_types as wgt;
+use windows::core::{w, PCWSTR};
 use windows::Win32::{
     Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
     Graphics::Gdi::HBRUSH,
@@ -42,7 +43,6 @@ use windows::Win32::{
         WS_OVERLAPPEDWINDOW,
     },
 };
-use windows::core::{w, PCWSTR};
 
 const WINDOW_WIDTH: u32 = 320;
 const WINDOW_HEIGHT: u32 = 240;
@@ -278,22 +278,6 @@ const DEPTH_FORMATS: [wgt::TextureFormat; 5] = [
     wgt::TextureFormat::Depth32FloatStencil8,
 ];
 
-macro_rules! check_limit {
-    ($field:ident, $expected:expr) => {{
-        let actual = limits.$field;
-        let expected = $expected;
-        if actual != expected {
-            failures.push(format!(
-                "{}: limit `{}` is {} but Gate 0 requires {}",
-                label,
-                stringify!($field),
-                actual,
-                expected
-            ));
-        }
-    }};
-}
-
 #[test]
 fn dx11_gate0_contract() {
     let mut failures: Vec<String> = Vec::new();
@@ -401,7 +385,11 @@ fn check_features_and_downlevel(
 ) {
     let mut expected_features = wgt::Features::DEPTH_CLIP_CONTROL;
     expected_features |= wgt::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
-    let announced: Vec<&str> = exposed.features.iter_names().map(|(name, _)| name).collect();
+    let announced: Vec<&str> = exposed
+        .features
+        .iter_names()
+        .map(|(name, _)| name)
+        .collect();
     println!("  features: {announced:?}");
     if exposed.features != expected_features {
         for (name, bit) in exposed.features.iter_names() {
@@ -476,6 +464,25 @@ fn check_limits(
     let feature_level = exposed.adapter.feature_level_name();
     let max_texture_dimension_2d = if feature_level == "10_1" { 8192 } else { 16384 };
 
+    // Defined inside the function so the local `limits`/`label`/`failures`
+    // bindings are visible at the macro definition site (macro_rules is
+    // hygienic for local variables).
+    macro_rules! check_limit {
+        ($field:ident, $expected:expr) => {{
+            let actual = limits.$field;
+            let expected = $expected;
+            if actual != expected {
+                failures.push(format!(
+                    "{}: limit `{}` is {} but Gate 0 requires {}",
+                    label,
+                    stringify!($field),
+                    actual,
+                    expected
+                ));
+            }
+        }};
+    }
+
     println!(
         "  limits: max_texture_dimension_2d = {} (feature level {}); \
          alignments are out of Gate 0 scope and only listed as follow-up",
@@ -486,7 +493,10 @@ fn check_limits(
          uniform_bounds_check_alignment={:?}",
         exposed.capabilities.alignments.buffer_copy_offset,
         exposed.capabilities.alignments.buffer_copy_pitch,
-        exposed.capabilities.alignments.uniform_bounds_check_alignment
+        exposed
+            .capabilities
+            .alignments
+            .uniform_bounds_check_alignment
     );
 
     check_limit!(max_texture_dimension_1d, 0);
@@ -504,7 +514,10 @@ fn check_limits(
     check_limit!(max_storage_textures_per_shader_stage, 0);
     check_limit!(max_uniform_buffers_per_shader_stage, 12);
     check_limit!(max_binding_array_elements_per_shader_stage, 0);
-    check_limit!(max_binding_array_acceleration_structure_elements_per_shader_stage, 0);
+    check_limit!(
+        max_binding_array_acceleration_structure_elements_per_shader_stage,
+        0
+    );
     check_limit!(max_binding_array_sampler_elements_per_shader_stage, 0);
     check_limit!(max_uniform_buffer_binding_size, 16384);
     check_limit!(max_storage_buffer_binding_size, 0);
@@ -633,7 +646,10 @@ fn check_format_capabilities(
             }
         }
     }
-    for format in [wgt::TextureFormat::Stencil8, wgt::TextureFormat::Rgb9e5Ufloat] {
+    for format in [
+        wgt::TextureFormat::Stencil8,
+        wgt::TextureFormat::Rgb9e5Ufloat,
+    ] {
         let caps = format_caps(format);
         if !caps.is_empty() {
             failures.push(format!(
@@ -963,7 +979,9 @@ fn negative_tests(
     let shader_module = match create_test_shader_module(device) {
         Ok(module) => module,
         Err(error) => {
-            failures.push(format!("{label}: negative-test shader setup failed: {error}"));
+            failures.push(format!(
+                "{label}: negative-test shader setup failed: {error}"
+            ));
             return;
         }
     };
@@ -987,7 +1005,10 @@ fn negative_tests(
     };
 
     // 1. Compressed BC textures are not mapped and must be rejected.
-    for format in [wgt::TextureFormat::Bc1RgbaUnorm, wgt::TextureFormat::Bc7RgbaUnormSrgb] {
+    for format in [
+        wgt::TextureFormat::Bc1RgbaUnorm,
+        wgt::TextureFormat::Bc7RgbaUnormSrgb,
+    ] {
         let description = format!("{label}: create_texture({format:?})");
         let call = || unsafe {
             let result = device.create_texture(&texture_desc(
@@ -1284,9 +1305,7 @@ fn msaa_render_pass_must_fail(
     let target_view = match target_view {
         Ok(target_view) => target_view,
         Err(e) => {
-            failures.push(format!(
-                "{label}: MSAA render pass RTV setup failed: {e:?}"
-            ));
+            failures.push(format!("{label}: MSAA render pass RTV setup failed: {e:?}"));
             unsafe { device.destroy_texture(target) };
             return;
         }
@@ -1355,11 +1374,7 @@ fn msaa_render_pass_must_fail(
     }
 }
 
-fn view_format_must_fail(
-    label: &str,
-    device: &wgpu_hal::dx11::Device,
-    failures: &mut Vec<String>,
-) {
+fn view_format_must_fail(label: &str, device: &wgpu_hal::dx11::Device, failures: &mut Vec<String>) {
     let texture = unsafe {
         device.create_texture(&texture_desc(
             "contract view format texture",
@@ -1468,8 +1483,8 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 fn create_test_shader_module(
     device: &wgpu_hal::dx11::Device,
 ) -> Result<wgpu_hal::dx11::ShaderModule, String> {
-    let module = naga::front::wgsl::parse_str(SHADER)
-        .map_err(|e| format!("WGSL parse failed: {e:?}"))?;
+    let module =
+        naga::front::wgsl::parse_str(SHADER).map_err(|e| format!("WGSL parse failed: {e:?}"))?;
     let info = naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
         naga::valid::Capabilities::all(),
