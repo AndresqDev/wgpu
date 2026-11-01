@@ -20,7 +20,7 @@ use windows::{
     },
 };
 
-use super::{Api, Device, Fence, SurfaceTexture, TextureView};
+use super::{Api, Device, Fence, SurfaceTexture, Texture, TextureView};
 
 /// Number of back buffers requested from DXGI.
 const BUFFER_COUNT: u32 = 2;
@@ -64,6 +64,9 @@ struct SwapChain {
     /// One view per back buffer. Dropped before the swap chain itself so that
     /// no back-buffer references survive when the swap chain is released.
     views: Vec<TextureView>,
+    /// Identity wrappers for the back-buffer resources. They are handed out to
+    /// `wgpu-core` through `SurfaceTexture`, which requires `Borrow<Texture>`.
+    textures: Vec<Texture>,
     raw: Dxgi::IDXGISwapChain1,
     /// Used to find the current back-buffer index. Available on Windows 10 and
     /// later; without it the surface conservatively uses buffer 0.
@@ -147,6 +150,7 @@ fn create_swapchain(
     }
 
     let mut views = Vec::with_capacity(desc.BufferCount as usize);
+    let mut textures = Vec::with_capacity(desc.BufferCount as usize);
     for index in 0..desc.BufferCount {
         let texture: Direct3D11::ID3D11Texture2D =
             unsafe { raw.GetBuffer(index) }.map_err(|e| {
@@ -190,12 +194,30 @@ fn create_swapchain(
         };
 
         views.push(view);
+        textures.push(Texture::new(
+            texture,
+            if srgb_view {
+                wgt::TextureFormat::Bgra8UnormSrgb
+            } else {
+                wgt::TextureFormat::Bgra8Unorm
+            },
+            wgt::Extent3d {
+                width: desc.Width,
+                height: desc.Height,
+                depth_or_array_layers: 1,
+            },
+            1,
+            1,
+            1,
+            wgt::TextureUses::COLOR_TARGET | wgt::TextureUses::PRESENT,
+        ));
     }
 
     Ok(SwapChain {
         raw,
         raw3,
         views,
+        textures,
         present_interval,
     })
 }
@@ -358,7 +380,10 @@ impl crate::Surface for Surface {
             % swapchain.views.len();
 
         Ok(crate::AcquiredSurfaceTexture {
-            texture: SurfaceTexture::new(swapchain.views[index].clone()),
+            texture: SurfaceTexture::new(
+                swapchain.textures[index].clone(),
+                swapchain.views[index].clone(),
+            ),
             suboptimal: false,
         })
     }

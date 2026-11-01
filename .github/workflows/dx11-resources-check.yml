@@ -1,0 +1,73 @@
+name: DX11 resources check
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - dx11-resources
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  check-windows:
+    name: Windows DX11 resource smoke test
+    runs-on: windows-2025
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check wgpu-hal with the DX11 backend
+        run: cargo check -p wgpu-hal --features dx11
+
+      - name: Run raw-dx11-resources
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'raw-dx11-resources.log'
+          $err = Join-Path $env:RUNNER_TEMP 'raw-dx11-resources.err.log'
+          Remove-Item $log, $err -ErrorAction SilentlyContinue
+
+          $cargo = (Get-Command cargo).Source
+          $process = Start-Process -FilePath $cargo `
+            -ArgumentList 'run', '-p', 'wgpu-hal', '--example', 'raw-dx11-resources', '--features', 'dx11' `
+            -NoNewWindow -PassThru `
+            -RedirectStandardOutput $log -RedirectStandardError $err
+
+          if (-not $process.WaitForExit(600000)) {
+            & taskkill.exe /F /T /PID $process.Id | Out-Host
+            Write-Host '::error::raw-dx11-resources timed out after 10 minutes'
+            exit 1
+          }
+
+          Get-Content $log -ErrorAction SilentlyContinue
+          Get-Content $err -ErrorAction SilentlyContinue
+
+          if ($process.ExitCode -ne 0) {
+            Write-Host "::error::raw-dx11-resources exited with code $($process.ExitCode)"
+            exit $process.ExitCode
+          }
+
+      - name: Upload smoke-test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw-dx11-resources-log
+          path: |
+            ${{ runner.temp }}/raw-dx11-resources.log
+            ${{ runner.temp }}/raw-dx11-resources.err.log
+          if-no-files-found: warn
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check

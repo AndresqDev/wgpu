@@ -6,7 +6,7 @@
 
 use alloc::string::String;
 
-use windows::Win32::Graphics::{Direct3D, Dxgi};
+use windows::Win32::Graphics::{Direct3D, Direct3D11, Dxgi};
 
 /// Converts the fixed-size UTF-16 adapter description into a Rust `String`.
 pub fn map_adapter_name(name: [u16; 128]) -> String {
@@ -78,6 +78,110 @@ pub fn map_texture_format(format: wgt::TextureFormat) -> Option<Dxgi::Common::DX
         Tf::Depth32FloatStencil8 => DXGI_FORMAT_D32_FLOAT_S8X24_UINT,
         _ => return None,
     })
+}
+
+/// Maps the format used by a shader resource view.
+///
+/// D3D11 depth textures expose their depth/stencil data through the
+/// corresponding typeless/color formats when sampled or read from a shader.
+pub fn map_srv_format(
+    format: wgt::TextureFormat,
+    aspect: wgt::TextureAspect,
+) -> Option<Dxgi::Common::DXGI_FORMAT> {
+    use wgt::TextureAspect as Ta;
+    use Dxgi::Common::*;
+
+    let format = map_texture_format(format)?;
+    Some(match (format, aspect) {
+        (DXGI_FORMAT_D32_FLOAT_S8X24_UINT, Ta::StencilOnly) => DXGI_FORMAT_X32_TYPELESS_G8X24_UINT,
+        (DXGI_FORMAT_D24_UNORM_S8_UINT, Ta::StencilOnly) => DXGI_FORMAT_X24_TYPELESS_G8_UINT,
+        (DXGI_FORMAT_D32_FLOAT_S8X24_UINT, _) => DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS,
+        (DXGI_FORMAT_D24_UNORM_S8_UINT, _) => DXGI_FORMAT_R24_UNORM_X8_TYPELESS,
+        (DXGI_FORMAT_D32_FLOAT, _) => DXGI_FORMAT_R32_FLOAT,
+        (DXGI_FORMAT_D16_UNORM, _) => DXGI_FORMAT_R16_UNORM,
+        (format, _) => format,
+    })
+}
+
+/// Maps the format used by a depth-stencil view for the selected aspect.
+pub fn map_dsv_format(
+    format: wgt::TextureFormat,
+    aspect: wgt::TextureAspect,
+) -> Option<Dxgi::Common::DXGI_FORMAT> {
+    use wgt::TextureAspect as Ta;
+    use Dxgi::Common::*;
+
+    let format = map_texture_format(format)?;
+    Some(match (format, aspect) {
+        (DXGI_FORMAT_D32_FLOAT_S8X24_UINT, Ta::StencilOnly) => DXGI_FORMAT_X32_TYPELESS_G8X24_UINT,
+        (DXGI_FORMAT_D24_UNORM_S8_UINT, Ta::StencilOnly) => DXGI_FORMAT_X24_TYPELESS_G8_UINT,
+        (DXGI_FORMAT_D32_FLOAT_S8X24_UINT, Ta::DepthOnly) => DXGI_FORMAT_D32_FLOAT,
+        (format, _) => format,
+    })
+}
+
+/// Builds a D3D11 filter from the WebGPU filter description.
+pub fn map_filter(
+    mag_filter: wgt::FilterMode,
+    min_filter: wgt::FilterMode,
+    mipmap_filter: wgt::MipmapFilterMode,
+    comparison: Option<wgt::CompareFunction>,
+    anisotropy_clamp: u16,
+) -> Direct3D11::D3D11_FILTER {
+    use Direct3D11::*;
+
+    if anisotropy_clamp > 1 {
+        return if comparison.is_some() {
+            D3D11_FILTER_COMPARISON_ANISOTROPIC
+        } else {
+            D3D11_FILTER_ANISOTROPIC
+        };
+    }
+
+    // D3D11_FILTER packs the min/mag/mip filter types in the low six bits and
+    // the comparison-reduction type in bit 7.
+    let min = (min_filter == wgt::FilterMode::Linear) as i32;
+    let mag = (mag_filter == wgt::FilterMode::Linear) as i32;
+    let mip = (mipmap_filter == wgt::MipmapFilterMode::Linear) as i32;
+    let reduction = comparison.is_some() as i32;
+    D3D11_FILTER(min | (mag << 2) | (mip << 4) | (reduction << 7))
+}
+
+/// Maps a WebGPU address mode to a D3D11 texture address mode.
+pub fn map_address_mode(mode: wgt::AddressMode) -> Direct3D11::D3D11_TEXTURE_ADDRESS_MODE {
+    use Direct3D11::*;
+
+    match mode {
+        wgt::AddressMode::ClampToEdge => D3D11_TEXTURE_ADDRESS_CLAMP,
+        wgt::AddressMode::Repeat => D3D11_TEXTURE_ADDRESS_WRAP,
+        wgt::AddressMode::MirrorRepeat => D3D11_TEXTURE_ADDRESS_MIRROR,
+        wgt::AddressMode::ClampToBorder => D3D11_TEXTURE_ADDRESS_BORDER,
+    }
+}
+
+/// Maps a WebGPU comparison function to a D3D11 comparison function.
+pub fn map_comparison(compare: wgt::CompareFunction) -> Direct3D11::D3D11_COMPARISON_FUNC {
+    use Direct3D11::*;
+
+    match compare {
+        wgt::CompareFunction::Never => D3D11_COMPARISON_NEVER,
+        wgt::CompareFunction::Less => D3D11_COMPARISON_LESS,
+        wgt::CompareFunction::Equal => D3D11_COMPARISON_EQUAL,
+        wgt::CompareFunction::LessEqual => D3D11_COMPARISON_LESS_EQUAL,
+        wgt::CompareFunction::Greater => D3D11_COMPARISON_GREATER,
+        wgt::CompareFunction::NotEqual => D3D11_COMPARISON_NOT_EQUAL,
+        wgt::CompareFunction::GreaterEqual => D3D11_COMPARISON_GREATER_EQUAL,
+        wgt::CompareFunction::Always => D3D11_COMPARISON_ALWAYS,
+    }
+}
+
+/// Maps a WebGPU sampler border color to the four floats D3D11 expects.
+pub fn map_border_color(color: wgt::SamplerBorderColor) -> [f32; 4] {
+    match color {
+        wgt::SamplerBorderColor::TransparentBlack | wgt::SamplerBorderColor::Zero => [0.0; 4],
+        wgt::SamplerBorderColor::OpaqueBlack => [0.0, 0.0, 0.0, 1.0],
+        wgt::SamplerBorderColor::OpaqueWhite => [1.0; 4],
+    }
 }
 
 /// Feature-dependent limits.

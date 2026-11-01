@@ -22,16 +22,21 @@ provides compilable stubs for the rest of the `wgpu-hal` API.
 - [`CommandBuffer::begin_render_pass`](crate::CommandEncoder::begin_render_pass)
   clears color attachments immediately on the immediate context. The
   `raw-dx11-window` example uses this to clear and present frames.
-- Buffers, textures, samplers, bind groups, pipelines and shaders are still
-  stubs. Their creation methods call `unimplemented!`.
+- [`Device::create_buffer`](crate::Device::create_buffer),
+  [`Device::create_texture`](crate::Device::create_texture),
+  [`Device::create_texture_view`](crate::Device::create_texture_view) and
+  [`Device::create_sampler`](crate::Device::create_sampler) create real D3D11
+  resources. Copy commands upload data from staging buffers; the
+  `raw-dx11-resources` example exercises this path.
+- Bind groups, pipelines and shaders are still stubs. Their creation methods
+  call `unimplemented!`.
 
 ## Next steps
 
 The immediate next milestone is to make command encoding and submission
 ordered: create deferred `ID3D11DeviceContext`s (or record into command lists)
 and execute them from [`Queue::submit`](crate::Queue::submit), instead of
-clearing during recording. After that, buffers and textures can be implemented,
-followed by FXC HLSL compilation and actual draw calls.
+clearing during recording. Bind groups, shaders and pipelines can then follow.
 */
 
 #![allow(unused_variables)]
@@ -53,7 +58,10 @@ pub use instance::Instance;
 pub use queue::Queue;
 pub use shader::ShaderModule;
 pub use surface::Surface;
-pub use types::{Fence, PipelineCache, Resource, SurfaceTexture, TextureView};
+pub(crate) use types::BufferMapMode;
+pub use types::{
+    Buffer, Fence, PipelineCache, Resource, Sampler, SurfaceTexture, Texture, TextureView,
+};
 
 /// The D3D11 backend marker type.
 #[derive(Clone, Debug)]
@@ -71,11 +79,11 @@ impl crate::Api for Api {
     type CommandEncoder = CommandBuffer;
     type CommandBuffer = CommandBuffer;
 
-    type Buffer = Resource;
-    type Texture = Resource;
+    type Buffer = Buffer;
+    type Texture = Texture;
     type SurfaceTexture = SurfaceTexture;
     type TextureView = TextureView;
-    type Sampler = Resource;
+    type Sampler = Sampler;
     type QuerySet = Resource;
     type Fence = Fence;
 
@@ -93,6 +101,7 @@ impl crate::Api for Api {
 
 crate::impl_dyn_resource!(
     Adapter,
+    Buffer,
     CommandBuffer,
     Device,
     Fence,
@@ -100,16 +109,18 @@ crate::impl_dyn_resource!(
     PipelineCache,
     Queue,
     Resource,
+    Sampler,
     ShaderModule,
     Surface,
     SurfaceTexture,
+    Texture,
     TextureView
 );
 
 impl crate::DynAccelerationStructure for Resource {}
 impl crate::DynBindGroup for Resource {}
 impl crate::DynBindGroupLayout for Resource {}
-impl crate::DynBuffer for Resource {}
+impl crate::DynBuffer for Buffer {}
 impl crate::DynCommandBuffer for CommandBuffer {}
 impl crate::DynComputePipeline for Resource {}
 impl crate::DynFence for Fence {}
@@ -118,14 +129,8 @@ impl crate::DynPipelineLayout for Resource {}
 impl crate::DynQuerySet for Resource {}
 impl crate::DynRenderPipeline for Resource {}
 impl crate::DynRayTracingPipeline for Resource {}
-impl crate::DynSampler for Resource {}
+impl crate::DynSampler for Sampler {}
 impl crate::DynShaderModule for ShaderModule {}
 impl crate::DynSurfaceTexture for SurfaceTexture {}
-impl crate::DynTexture for Resource {}
+impl crate::DynTexture for Texture {}
 impl crate::DynTextureView for TextureView {}
-
-impl core::borrow::Borrow<dyn crate::DynTexture> for Resource {
-    fn borrow(&self) -> &dyn crate::DynTexture {
-        self
-    }
-}
