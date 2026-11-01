@@ -1656,10 +1656,6 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_layout_rejects_more_than_14_constant_buffer_registers() {
-    }
-
-    #[test]
     fn bind_group_layout_enforces_per_stage_binding_limits() {
         let limits = test_limits();
 
