@@ -1314,6 +1314,23 @@ impl crate::Device for Device {
     ) -> Result<TextureView, crate::DeviceError> {
         use Direct3D11 as d3d;
 
+        // A mismatched view dimension must not reach the 2D accessor below.
+        match (texture.dimension(), desc.dimension) {
+            (wgt::TextureDimension::D1, wgt::TextureViewDimension::D1)
+            | (wgt::TextureDimension::D3, wgt::TextureViewDimension::D3) => {}
+            (wgt::TextureDimension::D2, _) => {}
+            (dimension, view) => {
+                log::error!(
+                    "D3D11 texture {} is {:?} but the requested view is {view:?}",
+                    desc.label.unwrap_or("<unlabelled>"),
+                    dimension
+                );
+                return Err(unexpected(
+                    "D3D11 texture view dimension does not match the texture dimension",
+                ));
+            }
+        }
+
         if desc.dimension == wgt::TextureViewDimension::D1 {
             return unsafe { self.create_texture1d_view(texture, desc) };
         }
