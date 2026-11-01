@@ -556,7 +556,7 @@ impl crate::CommandEncoder for CommandBuffer {
                 )
             };
 
-            let dxgi_format = match super::conv::map_texture_format(format) {
+            let dxgi_format = match super::conv::map_texture_format_resource(format) {
                 Some(format) => format,
                 None => {
                     log::error!("texture format is not supported for D3D11 upload");
@@ -610,8 +610,7 @@ impl crate::CommandEncoder for CommandBuffer {
             }
 
             for row in 0..rows as usize {
-                let src_row =
-                    unsafe { (mapped_src.pData as *const u8).add(row * pitch as usize) };
+                let src_row = unsafe { (mapped_src.pData as *const u8).add(row * pitch as usize) };
                 let dst_row = unsafe {
                     (mapped_dst.pData as *mut u8).add(row * mapped_dst.RowPitch as usize)
                 };
@@ -621,19 +620,39 @@ impl crate::CommandEncoder for CommandBuffer {
             unsafe {
                 self.context.Unmap(&staging_texture, 0);
                 self.context.Unmap(&staging, 0);
-                self.context.CopySubresourceRegion(
-                    dst.raw(),
-                    dst.subresource_index(
-                        copy.texture_base.mip_level,
-                        copy.texture_base.array_layer,
-                    ),
-                    copy.texture_base.origin.x,
-                    copy.texture_base.origin.y,
-                    0,
-                    &staging_texture,
-                    0,
-                    None,
-                );
+
+                let full_depth_subresource = dst.format().has_depth_aspect()
+                    && dst.mip_level_count() == 1
+                    && dst.array_layer_count() == 1
+                    && copy.texture_base.mip_level == 0
+                    && copy.texture_base.array_layer == 0
+                    && copy.texture_base.origin.x == 0
+                    && copy.texture_base.origin.y == 0
+                    && copy.texture_base.origin.z == 0
+                    && copy.size.width == dst.extent().width
+                    && copy.size.height == dst.extent().height
+                    && copy.size.depth == 1;
+
+                if full_depth_subresource {
+                    // CopySubresourceRegion on a depth-stencil resource must
+                    // copy the whole subresource. CopyResource is the
+                    // whole-resource form and avoids the depth box restriction.
+                    self.context.CopyResource(dst.raw(), &staging_texture);
+                } else {
+                    self.context.CopySubresourceRegion(
+                        dst.raw(),
+                        dst.subresource_index(
+                            copy.texture_base.mip_level,
+                            copy.texture_base.array_layer,
+                        ),
+                        copy.texture_base.origin.x,
+                        copy.texture_base.origin.y,
+                        0,
+                        &staging_texture,
+                        0,
+                        None,
+                    );
+                }
             }
         }
     }
@@ -649,7 +668,7 @@ impl crate::CommandEncoder for CommandBuffer {
     {
         let format = src.format();
         let full_aspects = crate::FormatAspects::from(format);
-        let dxgi_format = match super::conv::map_texture_format(format) {
+        let dxgi_format = match super::conv::map_texture_format_resource(format) {
             Some(format) => format,
             None => {
                 log::error!("texture format is not supported for D3D11 read-back");
@@ -718,25 +737,41 @@ impl crate::CommandEncoder for CommandBuffer {
                 }
             };
 
-            let Some(src_box) = make_box(&copy.texture_base.origin, &copy.size) else {
-                log::error!("texture-to-buffer source box overflowed");
-                continue;
-            };
-            unsafe {
-                self.context.CopySubresourceRegion(
-                    &staging_texture,
-                    0,
-                    0,
-                    0,
-                    0,
-                    src.raw(),
-                    src.subresource_index(
-                        copy.texture_base.mip_level,
-                        copy.texture_base.array_layer,
-                    ),
-                    Some(&src_box),
-                )
-            };
+            let full_depth_subresource = src.format().has_depth_aspect()
+                && src.mip_level_count() == 1
+                && src.array_layer_count() == 1
+                && copy.texture_base.mip_level == 0
+                && copy.texture_base.array_layer == 0
+                && copy.texture_base.origin.x == 0
+                && copy.texture_base.origin.y == 0
+                && copy.texture_base.origin.z == 0
+                && copy.size.width == src.extent().width
+                && copy.size.height == src.extent().height
+                && copy.size.depth == 1;
+
+            if full_depth_subresource {
+                unsafe { self.context.CopyResource(&staging_texture, src.raw()) };
+            } else {
+                let Some(src_box) = make_box(&copy.texture_base.origin, &copy.size) else {
+                    log::error!("texture-to-buffer source box overflowed");
+                    continue;
+                };
+                unsafe {
+                    self.context.CopySubresourceRegion(
+                        &staging_texture,
+                        0,
+                        0,
+                        0,
+                        0,
+                        src.raw(),
+                        src.subresource_index(
+                            copy.texture_base.mip_level,
+                            copy.texture_base.array_layer,
+                        ),
+                        Some(&src_box),
+                    )
+                };
+            }
 
             let mut mapped = Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
             if let Err(e) = unsafe {

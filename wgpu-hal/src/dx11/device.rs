@@ -733,7 +733,7 @@ impl crate::Device for Device {
             }
         }
 
-        let format = super::conv::map_texture_format(desc.format)
+        let format = super::conv::map_texture_format_resource(desc.format)
             .ok_or_else(|| unexpected("texture format is not supported by the D3D11 backend"))?;
 
         let bind_flags = map_texture_bind_flags(desc.usage);

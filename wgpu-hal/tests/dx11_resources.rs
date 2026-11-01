@@ -1363,23 +1363,20 @@ fn section_format_matrix(
     srgb_view_formats.view_formats = vec![wgt::TextureFormat::Rgba8UnormSrgb];
     let texture = unsafe { device.create_texture(&srgb_view_formats) }
         .map_err(|e| format!("create_texture(view_formats = [Rgba8UnormSrgb]): {e}"))?;
-    let srgb_view = create_view(
-        device,
-        &texture,
-        "sRGB view over Rgba8Unorm",
-        wgt::TextureFormat::Rgba8UnormSrgb,
-        wgt::TextureViewDimension::D2,
-        wgt::TextureUses::RESOURCE,
-        full_range(),
+    expect_err(
+        "create_texture_view(Rgba8UnormSrgb over Rgba8Unorm)",
+        create_view(
+            device,
+            &texture,
+            "sRGB view over Rgba8Unorm",
+            wgt::TextureFormat::Rgba8UnormSrgb,
+            wgt::TextureViewDimension::D2,
+            wgt::TextureUses::RESOURCE,
+            full_range(),
+        ),
     )?;
-    if srgb_view.raw_srv().is_none() {
-        return Err("sRGB view over Rgba8Unorm has no SRV".to_owned());
-    }
-    unsafe {
-        device.destroy_texture_view(srgb_view);
-        device.destroy_texture(texture);
-    }
-    println!("  view_formats: Bgra8Unorm rejected, Rgba8UnormSrgb accepted");
+    unsafe { device.destroy_texture(texture) };
+    println!("  view_formats: Bgra8Unorm and Rgba8UnormSrgb rejected (not advertised)");
 
     let zero_and_bad_mips: [(&str, u32, u32, u32, u32); 5] = [
         ("width = 0", 0, 4, 1, 1),

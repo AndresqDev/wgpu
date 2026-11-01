@@ -80,6 +80,27 @@ pub fn map_texture_format(format: wgt::TextureFormat) -> Option<Dxgi::Common::DX
     })
 }
 
+/// Maps the resource format used by a texture.
+///
+/// Depth-stencil resources must be created with a typeless DXGI format so
+/// that D3D11 can create typed DSV/SRV views and so that staging textures can
+/// be copied into them. `map_texture_format` remains the typed format used by
+/// views, pipelines and adapter capability queries.
+pub fn map_texture_format_resource(
+    format: wgt::TextureFormat,
+) -> Option<Dxgi::Common::DXGI_FORMAT> {
+    use wgt::TextureFormat as Tf;
+    use Dxgi::Common::*;
+
+    Some(match format {
+        Tf::Depth16Unorm => DXGI_FORMAT_R16_TYPELESS,
+        Tf::Depth24Plus | Tf::Depth24PlusStencil8 => DXGI_FORMAT_R24G8_TYPELESS,
+        Tf::Depth32Float => DXGI_FORMAT_R32_TYPELESS,
+        Tf::Depth32FloatStencil8 => DXGI_FORMAT_R32G8X24_TYPELESS,
+        _ => return map_texture_format(format),
+    })
+}
+
 /// Maps the format used by a shader resource view.
 ///
 /// D3D11 depth textures expose their depth/stencil data through the
@@ -115,7 +136,9 @@ pub fn map_dsv_format(
     Some(match (format, aspect) {
         (DXGI_FORMAT_D32_FLOAT_S8X24_UINT, Ta::StencilOnly) => DXGI_FORMAT_X32_TYPELESS_G8X24_UINT,
         (DXGI_FORMAT_D24_UNORM_S8_UINT, Ta::StencilOnly) => DXGI_FORMAT_X24_TYPELESS_G8_UINT,
-        (DXGI_FORMAT_D32_FLOAT_S8X24_UINT, Ta::DepthOnly) => DXGI_FORMAT_D32_FLOAT,
+        // A depth-only view of a packed depth/stencil resource still has to
+        // use the packed DSV format; D32_FLOAT is not compatible with the
+        // R32G8X24_TYPELESS resource that backs Depth32FloatStencil8.
         (format, _) => format,
     })
 }
