@@ -7,24 +7,31 @@ provides compilable stubs for the rest of the `wgpu-hal` API.
 
 ## Current state
 
-- [`Instance::init`](crate::Instance::init) creates an `IDXGIFactory1`.
+- [`Instance::init`](crate::Instance::init) creates an `IDXGIFactory2`.
 - [`Instance::enumerate_adapters`](crate::Instance::enumerate_adapters)
   enumerates `IDXGIAdapter1`s and validates each one by creating an
   `ID3D11Device` at feature level 11.0 or 10.1.
+- [`Instance::create_surface`](crate::Instance::create_surface) creates a
+  windowed [`Surface`] for a Win32 `HWND`.
 - [`Adapter::open`](crate::Adapter::open) creates a fresh `ID3D11Device` and
   returns [`Device`] / [`Queue`] wrappers around the device and its immediate
   context.
-- Buffers, textures, samplers, bind groups, pipelines, shaders and surfaces are
-  stubs. Their creation methods call `unimplemented!`, and command recording is
-  a no-op. They are not used by the `raw-dx11` smoke test.
+- [`Surface::configure`](crate::Surface::configure) creates a
+  `DXGI_SWAP_EFFECT_FLIP_DISCARD` swap chain with two BGRA8 back buffers and a
+  render-target view for each buffer.
+- [`CommandBuffer::begin_render_pass`](crate::CommandEncoder::begin_render_pass)
+  clears color attachments immediately on the immediate context. The
+  `raw-dx11-window` example uses this to clear and present frames.
+- Buffers, textures, samplers, bind groups, pipelines and shaders are still
+  stubs. Their creation methods call `unimplemented!`.
 
 ## Next steps
 
-The immediate next milestone is to make command encoding and submission real:
-create deferred `ID3D11DeviceContext`s (or record on the immediate context),
-store deferred command lists in [`CommandBuffer`], and execute/flush them from
-[`Queue::submit`](crate::Queue::submit). After that, buffers and textures can be
-implemented, followed by FXC HLSL compilation and swap-chain presentation.
+The immediate next milestone is to make command encoding and submission
+ordered: create deferred `ID3D11DeviceContext`s (or record into command lists)
+and execute them from [`Queue::submit`](crate::Queue::submit), instead of
+clearing during recording. After that, buffers and textures can be implemented,
+followed by FXC HLSL compilation and actual draw calls.
 */
 
 #![allow(unused_variables)]
@@ -46,7 +53,7 @@ pub use instance::Instance;
 pub use queue::Queue;
 pub use shader::ShaderModule;
 pub use surface::Surface;
-pub use types::{Fence, PipelineCache, Resource};
+pub use types::{Fence, PipelineCache, Resource, SurfaceTexture, TextureView};
 
 /// The D3D11 backend marker type.
 #[derive(Clone, Debug)]
@@ -66,8 +73,8 @@ impl crate::Api for Api {
 
     type Buffer = Resource;
     type Texture = Resource;
-    type SurfaceTexture = Resource;
-    type TextureView = Resource;
+    type SurfaceTexture = SurfaceTexture;
+    type TextureView = TextureView;
     type Sampler = Resource;
     type QuerySet = Resource;
     type Fence = Fence;
@@ -94,7 +101,9 @@ crate::impl_dyn_resource!(
     Queue,
     Resource,
     ShaderModule,
-    Surface
+    Surface,
+    SurfaceTexture,
+    TextureView
 );
 
 impl crate::DynAccelerationStructure for Resource {}
@@ -111,9 +120,9 @@ impl crate::DynRenderPipeline for Resource {}
 impl crate::DynRayTracingPipeline for Resource {}
 impl crate::DynSampler for Resource {}
 impl crate::DynShaderModule for ShaderModule {}
-impl crate::DynSurfaceTexture for Resource {}
+impl crate::DynSurfaceTexture for SurfaceTexture {}
 impl crate::DynTexture for Resource {}
-impl crate::DynTextureView for Resource {}
+impl crate::DynTextureView for TextureView {}
 
 impl core::borrow::Borrow<dyn crate::DynTexture> for Resource {
     fn borrow(&self) -> &dyn crate::DynTexture {

@@ -1,26 +1,34 @@
-//! Command encoder and command buffer stubs.
+//! Minimal D3D11 command encoder.
 //!
-//! D3D11 records commands directly on an immediate or deferred
-//! `ID3D11DeviceContext`. The final backend will use deferred contexts (or the
-//! immediate context) here; for now every recording method is a no-op and
-//! `end_encoding` returns an empty command buffer. This is sufficient for the
-//! adapter/device smoke test, but renders nothing.
+//! D3D11 records commands on an `ID3D11DeviceContext`. This milestone does not
+//! create deferred contexts yet: the encoder keeps a clone of the device's
+//! immediate context and executes supported commands (currently only render-pass
+//! clears) as soon as they are recorded. [`crate::Queue::submit`] then flushes
+//! that context.
+//!
+//! This means the clear becomes visible before the command buffer is submitted,
+//! which is fine for the clear/present milestone but not the final design.
+//! Deferred contexts and ordered command-list execution are the next step.
 
 use core::ops::Range;
 
-use super::{Api, Resource};
+use windows::Win32::Graphics::Direct3D11;
+
+use super::{Api, Resource, TextureView};
 
 /// Command buffer type, which also acts as the command encoder.
 ///
 /// Keeping a single type for both roles follows the structure of the noop
 /// backend and avoids maintaining two state machines before command recording
 /// is implemented.
-#[derive(Debug, Default)]
-pub struct CommandBuffer;
+#[derive(Debug)]
+pub struct CommandBuffer {
+    context: Direct3D11::ID3D11DeviceContext,
+}
 
 impl CommandBuffer {
-    pub(crate) fn new() -> Self {
-        Self
+    pub(crate) fn new(context: Direct3D11::ID3D11DeviceContext) -> Self {
+        Self { context }
     }
 }
 
@@ -34,7 +42,10 @@ impl crate::CommandEncoder for CommandBuffer {
     unsafe fn discard_encoding(&mut self) {}
 
     unsafe fn end_encoding(&mut self) -> Result<CommandBuffer, crate::DeviceError> {
-        Ok(CommandBuffer)
+        // The supported commands have already been executed on the immediate
+        // context, so the returned buffer only has to carry the context forward
+        // for `Queue::submit` (which currently just flushes).
+        Ok(CommandBuffer::new(self.context.clone()))
     }
 
     unsafe fn reset_all<I>(&mut self, _command_buffers: I) {}
@@ -131,8 +142,27 @@ impl crate::CommandEncoder for CommandBuffer {
 
     unsafe fn begin_render_pass(
         &mut self,
-        _desc: &crate::RenderPassDescriptor<Resource, Resource>,
+        desc: &crate::RenderPassDescriptor<Resource, TextureView>,
     ) -> Result<(), crate::DeviceError> {
+        for attachment in desc.color_attachments.iter().flatten() {
+            // D3D11 clears do not require the render target to be bound, so the
+            // pass can stay a no-op apart from the clear. `LOAD`/`STORE` and
+            // actual draw operations are not implemented yet.
+            if attachment.ops.contains(crate::AttachmentOps::LOAD_CLEAR) {
+                let color = attachment.clear_value;
+                let color = [
+                    color.r as f32,
+                    color.g as f32,
+                    color.b as f32,
+                    color.a as f32,
+                ];
+                unsafe {
+                    self.context
+                        .ClearRenderTargetView(attachment.target.view.raw(), &color)
+                };
+            }
+        }
+
         Ok(())
     }
     unsafe fn end_render_pass(&mut self) {}
