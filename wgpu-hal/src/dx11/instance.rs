@@ -19,12 +19,15 @@ use super::Adapter;
 pub struct Instance {
     factory: Dxgi::IDXGIFactory2,
     flags: wgt::InstanceFlags,
+    /// Whether adapter/device creation should request the D3D11 debug layer.
+    debug: bool,
 }
 
 impl fmt::Debug for Instance {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Instance")
             .field("flags", &self.flags)
+            .field("debug", &self.debug)
             .finish_non_exhaustive()
     }
 }
@@ -40,9 +43,13 @@ impl crate::Instance for Instance {
                 crate::InstanceError::new(format!("failed to create IDXGIFactory2: {e}"))
             })?;
 
+        let flags = desc.flags;
+        let debug = flags.intersects(wgt::InstanceFlags::DEBUG | wgt::InstanceFlags::VALIDATION);
+
         Ok(Self {
             factory,
-            flags: desc.flags,
+            flags,
+            debug,
         })
     }
 
@@ -86,7 +93,7 @@ impl crate::Instance for Instance {
                 }
             };
 
-            if let Some(exposed) = unsafe { Adapter::expose(raw) } {
+            if let Some(exposed) = unsafe { Adapter::expose(raw, self.debug) } {
                 adapters.push(exposed);
             }
         }
@@ -99,5 +106,15 @@ impl Instance {
     /// Returns the DXGI factory used to enumerate adapters and create surfaces.
     pub fn raw_factory(&self) -> &Dxgi::IDXGIFactory2 {
         &self.factory
+    }
+
+    /// Returns whether the instance flags request the D3D11 debug layer.
+    ///
+    /// `InstanceFlags::DEBUG` and `InstanceFlags::VALIDATION` both map to
+    /// `D3D11_CREATE_DEVICE_DEBUG` for this backend. Whether the layer is
+    /// actually available is reported per adapter by
+    /// [`super::Adapter::debug_layer_available`].
+    pub fn debug_layer_requested(&self) -> bool {
+        self.debug
     }
 }

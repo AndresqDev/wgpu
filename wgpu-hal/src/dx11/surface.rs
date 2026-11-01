@@ -1,9 +1,10 @@
 //! Windowed DXGI swap-chain surface.
 //!
-//! The surface owns an `IDXGISwapChain1` created for a single `HWND` and one
-//! render-target view per back buffer. Flip-model swap chains rotate their back
-//! buffers, so keeping a view for each buffer lets [`crate::Surface::acquire_texture`]
-//! hand out the buffer that DXGI is actually expecting next.
+//! The surface owns an `IDXGISwapChain1` created for a single `HWND`.
+//! D3D11 exposes only buffer 0 of a flip-model swap chain to the application;
+//! DXGI rotates the remaining buffers internally. The surface therefore keeps
+//! one render-target view for flip-discard/discard and the full set only for
+//! flip-sequential chains.
 //!
 //! Reconfiguration (including a window resize) is handled by releasing the
 //! previous swap chain and creating a new one at the requested extent instead
@@ -81,6 +82,7 @@ struct SwapChain {
     /// Used to find the current back-buffer index. Available on Windows 10 and
     /// later; without it the surface conservatively uses buffer 0.
     raw3: Option<Dxgi::IDXGISwapChain3>,
+    swap_effect: Dxgi::DXGI_SWAP_EFFECT,
     present_interval: u32,
 }
 
@@ -142,7 +144,12 @@ impl Surface {
                 // A removed or reset device invalidates the swap chain as a
                 // whole; report it as `Lost` so the caller can recreate the
                 // device and surface instead of retrying the present.
-                if hr == Dxgi::DXGI_ERROR_DEVICE_REMOVED || hr == Dxgi::DXGI_ERROR_DEVICE_RESET {
+                if matches!(
+                    hr,
+                    Dxgi::DXGI_ERROR_DEVICE_REMOVED
+                        | Dxgi::DXGI_ERROR_DEVICE_RESET
+                        | Dxgi::DXGI_ERROR_DEVICE_HUNG
+                ) {
                     crate::SurfaceError::Lost
                 } else {
                     crate::SurfaceError::Other("D3D11 swap-chain present failed")
@@ -182,9 +189,17 @@ fn create_swapchain(
         log::warn!("IDXGISwapChain3 is unavailable; falling back to back-buffer 0 for acquisition");
     }
 
-    let mut views = Vec::with_capacity(desc.BufferCount as usize);
-    let mut textures = Vec::with_capacity(desc.BufferCount as usize);
-    for index in 0..desc.BufferCount {
+    // D3D11 flip-model swap chains only expose buffer 0 to the application;
+    // DXGI rotates the remaining buffers internally. Only flip-sequential
+    // chains use GetCurrentBackBufferIndex to select among accessible buffers.
+    let buffer_count = if desc.SwapEffect == Dxgi::DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL {
+        desc.BufferCount
+    } else {
+        1
+    };
+    let mut views = Vec::with_capacity(buffer_count as usize);
+    let mut textures = Vec::with_capacity(buffer_count as usize);
+    for index in 0..buffer_count {
         let texture: Direct3D11::ID3D11Texture2D =
             unsafe { raw.GetBuffer(index) }.map_err(|e| {
                 log::error!("failed to get swap-chain buffer {index}: {e}");
@@ -251,6 +266,7 @@ fn create_swapchain(
         raw3,
         views,
         textures,
+        swap_effect: desc.SwapEffect,
         present_interval,
     })
 }
@@ -430,12 +446,16 @@ impl crate::Surface for Surface {
             ));
         }
 
-        let index = swapchain
-            .raw3
-            .as_ref()
-            .map(|raw3| unsafe { raw3.GetCurrentBackBufferIndex() } as usize)
-            .unwrap_or(0)
-            % swapchain.views.len();
+        let index = if swapchain.swap_effect == Dxgi::DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL {
+            swapchain
+                .raw3
+                .as_ref()
+                .map(|raw3| unsafe { raw3.GetCurrentBackBufferIndex() } as usize)
+                .unwrap_or(0)
+                % swapchain.views.len()
+        } else {
+            0
+        };
 
         Ok(crate::AcquiredSurfaceTexture {
             texture: SurfaceTexture::new(
