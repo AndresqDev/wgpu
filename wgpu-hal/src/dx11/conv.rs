@@ -375,10 +375,10 @@ pub fn limits_for_feature_level(level: Direct3D::D3D_FEATURE_LEVEL) -> wgt::Limi
         max_dynamic_uniform_buffers_per_pipeline_layout: 8,
         max_dynamic_storage_buffers_per_pipeline_layout: 0,
         max_sampled_textures_per_shader_stage: 16,
-        max_samplers_per_shader_stage: 16,
+        max_samplers_per_shader_stage: 8,
         max_storage_buffers_per_shader_stage: 0,
         max_storage_textures_per_shader_stage: 0,
-        max_uniform_buffers_per_shader_stage: 12,
+        max_uniform_buffers_per_shader_stage: 7,
         max_binding_array_elements_per_shader_stage: 0,
         max_binding_array_acceleration_structure_elements_per_shader_stage: 0,
         max_binding_array_sampler_elements_per_shader_stage: 0,
@@ -558,10 +558,10 @@ mod tests {
         assert_eq!(limits.max_dynamic_uniform_buffers_per_pipeline_layout, 8);
         assert_eq!(limits.max_dynamic_storage_buffers_per_pipeline_layout, 0);
         assert_eq!(limits.max_sampled_textures_per_shader_stage, 16);
-        assert_eq!(limits.max_samplers_per_shader_stage, 16);
+        assert_eq!(limits.max_samplers_per_shader_stage, 8);
         assert_eq!(limits.max_storage_buffers_per_shader_stage, 0);
         assert_eq!(limits.max_storage_textures_per_shader_stage, 0);
-        assert_eq!(limits.max_uniform_buffers_per_shader_stage, 12);
+        assert_eq!(limits.max_uniform_buffers_per_shader_stage, 7);
         assert_eq!(limits.max_binding_array_elements_per_shader_stage, 0);
         assert_eq!(
             limits.max_binding_array_acceleration_structure_elements_per_shader_stage,

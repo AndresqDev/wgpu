@@ -156,7 +156,32 @@ pub fn compile_shader(
     layout: &PipelineLayout,
     constants: &naga::back::PipelineConstants,
 ) -> Result<CompiledShader, crate::ShaderError> {
-    hlsl_stage_name(stage)?;
+    if let ShaderSource::Naga(naga) = &module.source {
+        if !naga
+            .module
+            .entry_points
+            .iter()
+            .any(|entry| entry.name == entry_point && entry.stage == stage)
+        {
+            return Err(shader_error(
+                module.label.as_deref(),
+                entry_point,
+                stage,
+                None,
+                "entry point does not exist for the requested stage",
+            ));
+        }
+    }
+
+    let Some(profile) = hlsl_profile(stage) else {
+        return Err(shader_error(
+            module.label.as_deref(),
+            entry_point,
+            stage,
+            None,
+            "D3D11 FXC supports vertex, fragment and compute shaders only",
+        ));
+    };
 
     let (hlsl, fxc_entry_point) = match &module.source {
         ShaderSource::Naga(naga) => {
@@ -185,7 +210,16 @@ pub fn compile_shader(
         });
     }
 
-    let bytecode = compile_fxc(&hlsl, module.label.as_deref(), &fxc_entry_point, stage)?;
+    let bytecode = compile_fxc(
+        &hlsl,
+        module.label.as_deref(),
+        &fxc_entry_point,
+        stage,
+        &profile,
+    )?;
+    // `compile_fxc` rejects empty blobs, so a successful shader can never put
+    // zero-byte bytecode in the cache.
+    debug_assert!(!bytecode.is_empty());
     module.cache.lock().insert(key, bytecode.clone());
 
     Ok(CompiledShader {
@@ -213,7 +247,13 @@ fn naga_to_hlsl(
         constants,
     )
     .map_err(|error| {
-        crate::ShaderError::Compilation(format!("pipeline constant error: {error:?}"))
+        shader_error(
+            module.label.as_deref(),
+            entry_point,
+            stage,
+            None,
+            alloc::format!("pipeline constant or entry point error: {error}"),
+        )
     })?;
 
     let mut options = layout.naga_options().clone();
@@ -230,9 +270,13 @@ fn naga_to_hlsl(
     let reflection = {
         let mut writer = hlsl::Writer::new(&mut source, &options, &pipeline_options);
         writer.write(&module_ir, &info, None).map_err(|error| {
-            crate::ShaderError::Compilation(format!(
-                "Naga HLSL translation failed for {entry_point} ({stage:?}): {error:?}"
-            ))
+            shader_error(
+                module.label.as_deref(),
+                entry_point,
+                stage,
+                None,
+                alloc::format!("Naga HLSL translation failed: {error}"),
+            )
         })?
     };
 
@@ -241,28 +285,62 @@ fn naga_to_hlsl(
         .into_iter()
         .next()
         .ok_or_else(|| {
-            crate::ShaderError::Compilation(format!(
-                "Naga did not report an HLSL entry point for {entry_point}"
-            ))
+            shader_error(
+                module.label.as_deref(),
+                entry_point,
+                stage,
+                None,
+                "Naga did not report an HLSL entry point",
+            )
         })?
         .map_err(|error| {
-            crate::ShaderError::Compilation(format!(
-                "Naga could not resolve entry point {entry_point}: {error:?}"
-            ))
+            shader_error(
+                module.label.as_deref(),
+                entry_point,
+                stage,
+                None,
+                alloc::format!("Naga could not resolve entry point: {error}"),
+            )
         })?;
 
     Ok((source, fxc_entry_point))
 }
 
-fn hlsl_stage_name(stage: naga::ShaderStage) -> Result<&'static str, crate::ShaderError> {
+fn hlsl_stage_name(stage: naga::ShaderStage) -> Option<&'static str> {
     match stage {
-        naga::ShaderStage::Vertex => Ok("vs"),
-        naga::ShaderStage::Fragment => Ok("ps"),
-        naga::ShaderStage::Compute => Ok("cs"),
-        other => Err(crate::ShaderError::Compilation(format!(
-            "D3D11 FXC supports vertex, fragment and compute shaders only, got {other:?}"
-        ))),
+        naga::ShaderStage::Vertex => Some("vs"),
+        naga::ShaderStage::Fragment => Some("ps"),
+        naga::ShaderStage::Compute => Some("cs"),
+        _ => None,
     }
+}
+
+fn hlsl_profile(stage: naga::ShaderStage) -> Option<String> {
+    let stage_name = hlsl_stage_name(stage)?;
+    Some(alloc::format!(
+        "{stage_name}_{}",
+        naga::back::hlsl::ShaderModel::V5_0.to_str()
+    ))
+}
+
+/// Builds a compilation error that identifies the shader module, entry point
+/// and stage/profile.
+fn shader_error(
+    label: Option<&str>,
+    entry_point: &str,
+    stage: naga::ShaderStage,
+    profile: Option<&str>,
+    detail: impl fmt::Display,
+) -> crate::ShaderError {
+    let profile = profile
+        .map(String::from)
+        .or_else(|| hlsl_profile(stage))
+        .unwrap_or_else(|| String::from("unsupported profile"));
+    crate::ShaderError::Compilation(alloc::format!(
+        "shader '{}' entry point '{}' ({stage:?}, {profile}): {detail}",
+        label.unwrap_or("<unnamed>"),
+        entry_point,
+    ))
 }
 
 fn compile_fxc(
@@ -270,18 +348,25 @@ fn compile_fxc(
     source_name: Option<&str>,
     entry_point: &str,
     stage: naga::ShaderStage,
+    profile: &str,
 ) -> Result<Vec<u8>, crate::ShaderError> {
-    let stage_name = hlsl_stage_name(stage)?;
-    let profile = alloc::format!(
-        "{stage_name}_{}",
-        naga::back::hlsl::ShaderModel::V5_0.to_str()
-    );
-
     let entry_point_c = CString::new(entry_point).map_err(|_| {
-        crate::ShaderError::Compilation("entry point contains a NUL byte".to_string())
+        shader_error(
+            source_name,
+            entry_point,
+            stage,
+            Some(profile),
+            "entry point contains a NUL byte",
+        )
     })?;
-    let profile_c = CString::new(profile.as_str()).map_err(|_| {
-        crate::ShaderError::Compilation("shader profile contains a NUL byte".to_string())
+    let profile_c = CString::new(profile).map_err(|_| {
+        shader_error(
+            source_name,
+            entry_point,
+            stage,
+            Some(profile),
+            "shader profile contains a NUL byte",
+        )
     })?;
     let source_name_c = source_name.and_then(|name| CString::new(name).ok());
 
@@ -310,23 +395,37 @@ fn compile_fxc(
     match result {
         Ok(()) => {
             let blob = bytecode.ok_or_else(|| {
-                crate::ShaderError::Compilation(
-                    "FXC reported success but returned no bytecode".to_string(),
+                shader_error(
+                    source_name,
+                    entry_point,
+                    stage,
+                    Some(profile),
+                    "FXC reported success but returned no bytecode blob",
                 )
             })?;
-            let pointer = unsafe { blob.GetBufferPointer() }.cast::<u8>();
             let length = unsafe { blob.GetBufferSize() };
-            if pointer.is_null() && length != 0 {
-                return Err(crate::ShaderError::Compilation(
-                    "FXC returned a null bytecode pointer".to_string(),
+            if length == 0 {
+                return Err(shader_error(
+                    source_name,
+                    entry_point,
+                    stage,
+                    Some(profile),
+                    "FXC reported success but returned empty bytecode",
                 ));
             }
 
-            let bytes = if length == 0 {
-                Vec::new()
-            } else {
-                unsafe { core::slice::from_raw_parts(pointer, length) }.to_vec()
-            };
+            let pointer = unsafe { blob.GetBufferPointer() }.cast::<u8>();
+            if pointer.is_null() {
+                return Err(shader_error(
+                    source_name,
+                    entry_point,
+                    stage,
+                    Some(profile),
+                    "FXC reported success but returned a null bytecode pointer",
+                ));
+            }
+
+            let bytes = unsafe { core::slice::from_raw_parts(pointer, length) }.to_vec();
             log::debug!(
                 "compiled D3D11 shader '{entry_point}' as {profile}: {} bytes",
                 bytes.len()
@@ -335,9 +434,13 @@ fn compile_fxc(
         }
         Err(error) => {
             let details = errors.as_ref().map(blob_message).unwrap_or_default();
-            Err(crate::ShaderError::Compilation(alloc::format!(
-                "FXC failed to compile '{entry_point}' as {profile}: {error}{details}"
-            )))
+            Err(shader_error(
+                source_name,
+                entry_point,
+                stage,
+                Some(profile),
+                alloc::format!("FXC failed: {error}{details}"),
+            ))
         }
     }
 }

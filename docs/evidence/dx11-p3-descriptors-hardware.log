@@ -1,0 +1,31 @@
+
+running 1 test
+dx11_descriptors: enumerated 2 DXGI adapter(s)
+adapter[0] 'Intel(R) HD Graphics 4400' (IntegratedGpu)
+opened D3D11 device on 'Intel(R) HD Graphics 4400' with Features::empty()
+
+=== 1. static UBO + texture + sampler ===
+static descriptors: bound b0/t0/s0 and b1/t1/s1
+
+=== 2. dynamic uniform buffer ===
+dynamic UBO: offsets 0 and 256 accepted
+
+=== 3. unsupported binding types and dimensions ===
+unsupported binding types, dimensions and arrays rejected
+
+=== 4. layout limits ===
+bind group count, immediates and binding limits rejected
+
+=== 5. invalid dynamic offsets ===
+  dynamic offset 128: bind group 0 binding 0 total offset 128 is not a multiple of 256 bytes
+  dynamic offset outside the buffer: bind group 0 binding 0 range 512..768 is outside the buffer of 512 bytes
+invalid dynamic offsets recorded an encoder error
+
+=== 6. push constants ===
+set_immediates recorded an encoder error
+dx11_descriptors: destroying the queue and device
+dx11_descriptors: all descriptor sections passed
+test dx11_descriptors ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
