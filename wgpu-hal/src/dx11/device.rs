@@ -1335,7 +1335,11 @@ impl crate::Device for Device {
         &self,
         _desc: &crate::ComputePipelineDescriptor<PipelineLayout, ShaderModule, PipelineCache>,
     ) -> Result<Resource, crate::PipelineError> {
-        unimplemented!("D3D11 compute pipeline creation is not implemented yet")
+        log::error!("D3D11 compute pipelines are not implemented");
+        Err(crate::PipelineError::Linkage(
+            wgt::ShaderStages::COMPUTE,
+            "D3D11 compute pipelines are not implemented".into(),
+        ))
     }
 
     unsafe fn destroy_compute_pipeline(&self, _pipeline: Resource) {}
@@ -1344,7 +1348,11 @@ impl crate::Device for Device {
         &self,
         _desc: &crate::RayTracingPipelineDescriptor<PipelineLayout, ShaderModule, PipelineCache>,
     ) -> Result<Resource, crate::PipelineError> {
-        unimplemented!("D3D11 does not support ray tracing")
+        log::error!("D3D11 does not support ray tracing pipelines");
+        Err(crate::PipelineError::Linkage(
+            wgt::ShaderStages::VERTEX_FRAGMENT,
+            "D3D11 does not support ray tracing pipelines".into(),
+        ))
     }
 
     unsafe fn destroy_ray_tracing_pipeline(&self, _pipeline: Resource) {}
@@ -1354,7 +1362,7 @@ impl crate::Device for Device {
         _pipeline: &Resource,
         _groups: core::ops::Range<u32>,
     ) -> Result<Vec<u8>, crate::DeviceError> {
-        unimplemented!("D3D11 does not support ray tracing")
+        Err(unexpected("D3D11 does not support ray tracing"))
     }
 
     unsafe fn create_pipeline_cache(
@@ -1370,7 +1378,7 @@ impl crate::Device for Device {
         &self,
         _desc: &wgt::QuerySetDescriptor<crate::Label>,
     ) -> Result<Resource, crate::DeviceError> {
-        unimplemented!("D3D11 query set creation is not implemented yet")
+        Err(unexpected("D3D11 query set creation is not implemented"))
     }
 
     unsafe fn destroy_query_set(&self, _set: Resource) {}
@@ -1410,7 +1418,7 @@ impl crate::Device for Device {
         &self,
         _desc: &crate::AccelerationStructureDescriptor,
     ) -> Result<Resource, crate::DeviceError> {
-        unimplemented!("D3D11 does not support acceleration structures")
+        Err(unexpected("D3D11 does not support acceleration structures"))
     }
 
     unsafe fn get_acceleration_structure_build_sizes<'a>(

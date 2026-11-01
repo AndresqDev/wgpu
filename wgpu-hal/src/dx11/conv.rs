@@ -331,53 +331,92 @@ pub fn map_stencil_face(face: &wgt::StencilFaceState) -> Direct3D11::D3D11_DEPTH
 
 /// Feature-dependent limits.
 ///
-/// These are deliberately conservative. The actual D3D11 limits are queried
-/// from the device in the full implementation; this is enough for the raw
-/// device-creation smoke test and for `wgpu-core` to enumerate the adapter.
+/// This is the Gate 0 contract table: every field is spelled out explicitly so
+/// that the adapter report matches the documented target exactly. Storage and
+/// compute limits are zero because the backend does not implement them yet.
 pub fn limits_for_feature_level(level: Direct3D::D3D_FEATURE_LEVEL) -> wgt::Limits {
-    let mut limits = wgt::Limits::downlevel_defaults();
-    let max_texture_dimension = if level.0 >= (Direct3D::D3D_FEATURE_LEVEL_11_0).0 {
+    let max_texture_dimension_2d = if level.0 >= (Direct3D::D3D_FEATURE_LEVEL_11_0).0 {
         16384
     } else {
         8192
     };
 
-    limits.max_texture_dimension_1d = max_texture_dimension;
-    limits.max_texture_dimension_2d = max_texture_dimension;
-    limits.max_texture_dimension_3d = 2048;
-    limits.max_texture_array_layers = 2048;
-    limits
+    wgt::Limits {
+        max_texture_dimension_1d: 0,
+        max_texture_dimension_2d,
+        max_texture_dimension_3d: 0,
+        max_texture_array_layers: 2048,
+        max_bind_groups: 4,
+        max_bind_groups_plus_vertex_buffers: 24,
+        max_bindings_per_bind_group: 64,
+        max_dynamic_uniform_buffers_per_pipeline_layout: 8,
+        max_dynamic_storage_buffers_per_pipeline_layout: 0,
+        max_sampled_textures_per_shader_stage: 16,
+        max_samplers_per_shader_stage: 16,
+        max_storage_buffers_per_shader_stage: 0,
+        max_storage_textures_per_shader_stage: 0,
+        max_uniform_buffers_per_shader_stage: 12,
+        max_binding_array_elements_per_shader_stage: 0,
+        max_binding_array_acceleration_structure_elements_per_shader_stage: 0,
+        max_binding_array_sampler_elements_per_shader_stage: 0,
+        max_uniform_buffer_binding_size: 16384,
+        max_storage_buffer_binding_size: 0,
+        max_vertex_buffers: 8,
+        max_buffer_size: 268435456,
+        max_vertex_attributes: 16,
+        max_vertex_buffer_array_stride: 2048,
+        max_inter_stage_shader_variables: 15,
+        min_uniform_buffer_offset_alignment: 256,
+        min_storage_buffer_offset_alignment: 256,
+        max_color_attachments: 4,
+        max_color_attachment_bytes_per_sample: 32,
+        max_compute_workgroup_storage_size: 0,
+        max_compute_invocations_per_workgroup: 0,
+        max_compute_workgroup_size_x: 0,
+        max_compute_workgroup_size_y: 0,
+        max_compute_workgroup_size_z: 0,
+        max_compute_workgroups_per_dimension: 0,
+        max_immediate_size: 0,
+        max_non_sampler_bindings: 1_000_000,
+        max_task_workgroup_total_count: 0,
+        max_task_workgroups_per_dimension: 0,
+        max_mesh_workgroup_total_count: 0,
+        max_mesh_workgroups_per_dimension: 0,
+        max_task_invocations_per_workgroup: 0,
+        max_task_invocations_per_dimension: 0,
+        max_mesh_invocations_per_workgroup: 0,
+        max_mesh_invocations_per_dimension: 0,
+        max_task_payload_size: 0,
+        max_mesh_output_vertices: 0,
+        max_mesh_output_primitives: 0,
+        max_mesh_output_layers: 0,
+        max_mesh_multiview_view_count: 0,
+        max_blas_primitive_count: 0,
+        max_blas_geometry_count: 0,
+        max_tlas_instance_count: 0,
+        max_acceleration_structures_per_shader_stage: 0,
+        max_buffers_and_acceleration_structures_per_shader_stage: 12,
+        max_multiview_view_count: 0,
+        max_ray_dispatch_count: 0,
+        max_ray_recursion_depth: 0,
+    }
 }
 
 /// Feature-dependent downlevel capabilities.
+///
+/// Gate 0 exposes exactly the flags below and nothing else; in particular it
+/// does not start from [`wgt::DownlevelFlags::compliant`], so
+/// `is_webgpu_compliant()` is always false.
 pub fn downlevel_for_feature_level(
     level: Direct3D::D3D_FEATURE_LEVEL,
 ) -> wgt::DownlevelCapabilities {
-    let mut flags = wgt::DownlevelFlags::compliant();
-
-    // D3D11 does not expose arbitrary view formats, and query resolves are not
-    // implemented by this skeleton.
-    flags.remove(
-        wgt::DownlevelFlags::VIEW_FORMATS
-            | wgt::DownlevelFlags::SURFACE_VIEW_FORMATS
-            | wgt::DownlevelFlags::NONBLOCKING_QUERY_RESOLVE
-            // Compute and writable storage textures are not implemented yet.
-            // Leaving COMPUTE_SHADERS set makes wgpu-core enable its indirect
-            // validation compute pass, which requires dynamic storage offsets.
-            | wgt::DownlevelFlags::COMPUTE_SHADERS
-            | wgt::DownlevelFlags::FRAGMENT_WRITABLE_STORAGE,
-    );
-
-    if level.0 < (Direct3D::D3D_FEATURE_LEVEL_11_0).0 {
-        // Feature level 10_1 has no guaranteed compute support, and therefore
-        // no writable storage images or vertex/fragment storage buffers.
-        flags.remove(
-            wgt::DownlevelFlags::COMPUTE_SHADERS
-                | wgt::DownlevelFlags::FRAGMENT_WRITABLE_STORAGE
-                | wgt::DownlevelFlags::FRAGMENT_STORAGE
-                | wgt::DownlevelFlags::VERTEX_STORAGE,
-        );
-    }
+    let flags = wgt::DownlevelFlags::BASE_VERTEX
+        | wgt::DownlevelFlags::NON_POWER_OF_TWO_MIPMAPPED_TEXTURES
+        | wgt::DownlevelFlags::CUBE_ARRAY_TEXTURES
+        | wgt::DownlevelFlags::COMPARISON_SAMPLERS
+        | wgt::DownlevelFlags::INDEPENDENT_BLEND
+        | wgt::DownlevelFlags::FULL_DRAW_INDEX_UINT32
+        | wgt::DownlevelFlags::DEPTH_BIAS_CLAMP;
 
     wgt::DownlevelCapabilities {
         flags,
@@ -390,17 +429,18 @@ pub fn downlevel_for_feature_level(
     }
 }
 
-/// Minimal set of features that are safe to expose from the skeleton.
-pub fn features_for_feature_level(level: Direct3D::D3D_FEATURE_LEVEL) -> wgt::Features {
-    let mut features =
-        wgt::Features::DEPTH_CLIP_CONTROL | wgt::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
-    if level.0 >= (Direct3D::D3D_FEATURE_LEVEL_11_0).0 {
-        features |= wgt::Features::TEXTURE_COMPRESSION_BC;
-    }
-    features
+/// Minimal set of features that are safe to expose from the backend.
+///
+/// Both feature levels advertise the same set: texture compression (BC) is not
+/// supported by the mapped format allowlist, so it is not exposed at all.
+pub fn features_for_feature_level(_level: Direct3D::D3D_FEATURE_LEVEL) -> wgt::Features {
+    wgt::Features::DEPTH_CLIP_CONTROL | wgt::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
 }
 
 /// Alignment requirements used by the stub device.
+///
+/// These values are NOT part of the Gate 0 target table and remain unverified;
+/// they are an explicit follow-up item.
 pub fn alignments() -> crate::Alignments {
     crate::Alignments {
         buffer_copy_offset: wgt::BufferSize::MIN,
@@ -411,5 +451,131 @@ pub fn alignments() -> crate::Alignments {
         ray_tracing_pipeline_group_data_size: 1,
         ray_tracing_pipeline_group_data_alignment: 1,
         ray_tracing_pipeline_data_offset_alignment: 1,
+    }
+}
+
+/// Pure Gate 0 contract tests: no GPU, no device, no adapter.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use windows::Win32::Graphics::Direct3D::{D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0};
+
+    fn expected_downlevel_flags() -> wgt::DownlevelFlags {
+        wgt::DownlevelFlags::BASE_VERTEX
+            | wgt::DownlevelFlags::NON_POWER_OF_TWO_MIPMAPPED_TEXTURES
+            | wgt::DownlevelFlags::CUBE_ARRAY_TEXTURES
+            | wgt::DownlevelFlags::COMPARISON_SAMPLERS
+            | wgt::DownlevelFlags::INDEPENDENT_BLEND
+            | wgt::DownlevelFlags::FULL_DRAW_INDEX_UINT32
+            | wgt::DownlevelFlags::DEPTH_BIAS_CLAMP
+    }
+
+    #[test]
+    fn features_are_exactly_the_two_gate0_flags() {
+        let expected = wgt::Features::DEPTH_CLIP_CONTROL
+            | wgt::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+
+        for level in [D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1] {
+            let features = features_for_feature_level(level);
+            assert_eq!(features, expected, "unexpected features for {level:?}");
+            assert!(
+                !features.contains(wgt::Features::TEXTURE_COMPRESSION_BC),
+                "TEXTURE_COMPRESSION_BC must not be advertised for {level:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn downlevel_flags_shader_model_and_compliance() {
+        for (level, shader_model) in [
+            (D3D_FEATURE_LEVEL_11_0, wgt::ShaderModel::Sm5),
+            (D3D_FEATURE_LEVEL_10_1, wgt::ShaderModel::Sm4),
+        ] {
+            let downlevel = downlevel_for_feature_level(level);
+            assert_eq!(
+                downlevel.flags,
+                expected_downlevel_flags(),
+                "unexpected downlevel flags for {level:?}"
+            );
+            assert_eq!(downlevel.shader_model, shader_model);
+            assert_eq!(downlevel.limits, wgt::DownlevelLimits::default());
+            assert!(
+                !downlevel.is_webgpu_compliant(),
+                "DX11 must never report WebGPU compliance for {level:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn limits_match_the_gate0_table_for_11_0() {
+        assert_gate0_limits(limits_for_feature_level(D3D_FEATURE_LEVEL_11_0), 16384);
+    }
+
+    #[test]
+    fn limits_match_the_gate0_table_for_10_1() {
+        assert_gate0_limits(limits_for_feature_level(D3D_FEATURE_LEVEL_10_1), 8192);
+    }
+
+    /// Asserts every Gate 0 limit value, plus that no other field differs from
+    /// the explicit table (the table is spelled out field by field).
+    fn assert_gate0_limits(limits: wgt::Limits, expected_2d: u32) {
+        assert_eq!(limits.max_texture_dimension_1d, 0);
+        assert_eq!(limits.max_texture_dimension_2d, expected_2d);
+        assert_eq!(limits.max_texture_dimension_3d, 0);
+        assert_eq!(limits.max_texture_array_layers, 2048);
+        assert_eq!(limits.max_bind_groups, 4);
+        assert_eq!(limits.max_bind_groups_plus_vertex_buffers, 24);
+        assert_eq!(limits.max_bindings_per_bind_group, 64);
+        assert_eq!(limits.max_dynamic_uniform_buffers_per_pipeline_layout, 8);
+        assert_eq!(limits.max_dynamic_storage_buffers_per_pipeline_layout, 0);
+        assert_eq!(limits.max_sampled_textures_per_shader_stage, 16);
+        assert_eq!(limits.max_samplers_per_shader_stage, 16);
+        assert_eq!(limits.max_storage_buffers_per_shader_stage, 0);
+        assert_eq!(limits.max_storage_textures_per_shader_stage, 0);
+        assert_eq!(limits.max_uniform_buffers_per_shader_stage, 12);
+        assert_eq!(limits.max_binding_array_elements_per_shader_stage, 0);
+        assert_eq!(limits.max_binding_array_acceleration_structure_elements_per_shader_stage, 0);
+        assert_eq!(limits.max_binding_array_sampler_elements_per_shader_stage, 0);
+        assert_eq!(limits.max_uniform_buffer_binding_size, 16384);
+        assert_eq!(limits.max_storage_buffer_binding_size, 0);
+        assert_eq!(limits.max_vertex_buffers, 8);
+        assert_eq!(limits.max_buffer_size, 268435456);
+        assert_eq!(limits.max_vertex_attributes, 16);
+        assert_eq!(limits.max_vertex_buffer_array_stride, 2048);
+        assert_eq!(limits.max_inter_stage_shader_variables, 15);
+        assert_eq!(limits.min_uniform_buffer_offset_alignment, 256);
+        assert_eq!(limits.min_storage_buffer_offset_alignment, 256);
+        assert_eq!(limits.max_color_attachments, 4);
+        assert_eq!(limits.max_color_attachment_bytes_per_sample, 32);
+        assert_eq!(limits.max_compute_workgroup_storage_size, 0);
+        assert_eq!(limits.max_compute_invocations_per_workgroup, 0);
+        assert_eq!(limits.max_compute_workgroup_size_x, 0);
+        assert_eq!(limits.max_compute_workgroup_size_y, 0);
+        assert_eq!(limits.max_compute_workgroup_size_z, 0);
+        assert_eq!(limits.max_compute_workgroups_per_dimension, 0);
+        assert_eq!(limits.max_immediate_size, 0);
+        assert_eq!(limits.max_non_sampler_bindings, 1_000_000);
+        assert_eq!(limits.max_task_workgroup_total_count, 0);
+        assert_eq!(limits.max_task_workgroups_per_dimension, 0);
+        assert_eq!(limits.max_mesh_workgroup_total_count, 0);
+        assert_eq!(limits.max_mesh_workgroups_per_dimension, 0);
+        assert_eq!(limits.max_task_invocations_per_workgroup, 0);
+        assert_eq!(limits.max_task_invocations_per_dimension, 0);
+        assert_eq!(limits.max_mesh_invocations_per_workgroup, 0);
+        assert_eq!(limits.max_mesh_invocations_per_dimension, 0);
+        assert_eq!(limits.max_task_payload_size, 0);
+        assert_eq!(limits.max_mesh_output_vertices, 0);
+        assert_eq!(limits.max_mesh_output_primitives, 0);
+        assert_eq!(limits.max_mesh_output_layers, 0);
+        assert_eq!(limits.max_mesh_multiview_view_count, 0);
+        assert_eq!(limits.max_blas_primitive_count, 0);
+        assert_eq!(limits.max_blas_geometry_count, 0);
+        assert_eq!(limits.max_tlas_instance_count, 0);
+        assert_eq!(limits.max_acceleration_structures_per_shader_stage, 0);
+        assert_eq!(limits.max_buffers_and_acceleration_structures_per_shader_stage, 12);
+        assert_eq!(limits.max_multiview_view_count, 0);
+        assert_eq!(limits.max_ray_dispatch_count, 0);
+        assert_eq!(limits.max_ray_recursion_depth, 0);
     }
 }

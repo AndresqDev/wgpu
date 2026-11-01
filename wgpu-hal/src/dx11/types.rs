@@ -322,6 +322,34 @@ impl BindGroupLayout {
             previous = Some(entry.binding);
 
             match entry.ty {
+                // No storage binding may be accepted and then silently dropped.
+                // D3D11 without compute/writable-storage support has no way to
+                // bind storage buffers or storage textures.
+                wgt::BindingType::Buffer {
+                    ty: wgt::BufferBindingType::Storage { .. },
+                    has_dynamic_offset,
+                    ..
+                } => {
+                    if has_dynamic_offset {
+                        log::error!(
+                            "D3D11 does not support dynamic storage buffer offsets (binding {})",
+                            entry.binding
+                        );
+                    } else {
+                        log::error!(
+                            "D3D11 does not support storage buffers (binding {})",
+                            entry.binding
+                        );
+                    }
+                    return Err(crate::DeviceError::Unexpected);
+                }
+                wgt::BindingType::StorageTexture { .. } => {
+                    log::error!(
+                        "D3D11 does not support storage textures (binding {})",
+                        entry.binding
+                    );
+                    return Err(crate::DeviceError::Unexpected);
+                }
                 wgt::BindingType::AccelerationStructure { .. }
                 | wgt::BindingType::ExternalTexture => {
                     log::error!("D3D11 does not support this binding type: {:?}", entry.ty);
@@ -387,9 +415,12 @@ impl PipelineLayout {
             );
             return Err(crate::DeviceError::Unexpected);
         }
-        if immediate_size % 4 != 0 || immediate_size > 65_536 {
+        if immediate_size > 0 {
+            // `max_immediate_size` is advertised as 0, so no accepted pipeline
+            // layout may request immediates; otherwise `set_immediates` would be
+            // reachable through a layout that cannot honour it.
             log::error!(
-                "D3D11 immediate data must be a multiple of 4 bytes and at most 65536 bytes"
+                "D3D11 does not support immediates, but the pipeline layout requests {immediate_size} bytes"
             );
             return Err(crate::DeviceError::Unexpected);
         }
@@ -910,3 +941,14 @@ impl Fence {
 /// eventually be cached by `wgpu-core` or on disk.
 #[derive(Debug, Default)]
 pub struct PipelineCache;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pipeline_layout_rejects_immediates_and_accepts_none() {
+        assert!(PipelineLayout::new(Vec::new(), 0).is_ok());
+        assert!(PipelineLayout::new(Vec::new(), 4).is_err());
+    }
+}
