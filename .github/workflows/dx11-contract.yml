@@ -1,0 +1,75 @@
+name: DX11 Contract
+
+# Gate 0 capability contract test.
+#
+# The contract test is EXPECTED to be red against the current pin
+# (`TEXTURE_COMPRESSION_BC`, extra downlevel flags, storage/compute limits and
+# `MULTISAMPLE_X4` are still advertised). This workflow exists to produce that
+# evidence honestly: no `continue-on-error`, no weakened steps.
+#
+# `workflow_dispatch` takes a `ref` input so the same workflow can be pointed at
+# `dx11-hal-core` (or any other branch) without copying the file there. On
+# `push` the `inputs` context is empty, so the checkout falls back to
+# `github.ref`.
+
+on:
+  push:
+    branches:
+      - dx11-verification
+      - dx11-stabilization
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to test (branch, tag or SHA). Defaults to dx11-verification."
+        type: string
+        default: dx11-verification
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  contract-windows:
+    name: Windows DX11 contract test
+    runs-on: windows-2025
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Empty on `push`; `||` falls back to the triggering ref.
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # The repo pins channel 1.93 in rust-toolchain.toml; this action
+          # honours the toolchain file and adds rustfmt.
+          components: rustfmt
+
+      - name: Check wgpu-hal with the DX11 backend
+        run: cargo check -p wgpu-hal --features dx11
+
+      - name: Run the Gate 0 contract test
+        shell: bash
+        # `pipefail` keeps the cargo exit code visible through `tee`.
+        run: |
+          set -o pipefail
+          cargo test -p wgpu-hal --features dx11 --test dx11_contract -- --nocapture 2>&1 | tee contract-test.log
+
+      - name: Check formatting
+        if: always()
+        run: cargo fmt --all -- --check
+
+      - name: Upload contract test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-test-log
+          path: contract-test.log
+          if-no-files-found: warn
