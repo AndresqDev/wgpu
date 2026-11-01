@@ -8,6 +8,7 @@ fn main() {
                 all(feature = "fragile-send-sync-non-atomic-wasm", not(target_feature = "atomics"))
             )
         ) },
+        dx11: { all(target_os = "windows", feature = "dx11") },
         dx12: { all(target_os = "windows", feature = "dx12") },
         webgl: { all(target_arch = "wasm32", not(target_os = "emscripten"), feature = "webgl") },
         gles: { any(

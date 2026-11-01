@@ -12,6 +12,7 @@ fn main() {
         // Backends - keep this in sync with `wgpu-core/Cargo.toml` & docs in `wgpu/Cargo.toml`
         webgpu: { all(not(native), not(Emscripten), feature = "webgpu") },
         webgl: { all(not(native), not(Emscripten), feature = "webgl") },
+        dx11: { all(target_os = "windows", feature = "dx11") },
         dx12: { all(target_os = "windows", feature = "dx12") },
         metal: { all(target_vendor = "apple", feature = "metal") },
         vulkan: { any(
@@ -41,7 +42,7 @@ fn main() {
                 native,
                 // `wgpu_core` is implied if any backend other than WebGPU is enabled.
                 // (this is redundant except for `gles` and `noop`)
-                webgl, dx12, metal, vulkan, gles, noop
+                webgl, dx11, dx12, metal, vulkan, gles, noop
             )
         },
 

@@ -129,6 +129,8 @@ portable-atomic = ["dep:portable-atomic", "wgpu-hal/portable-atomic"]
 # Look to wgpu-hal's Cargo.toml for explaination how these features and the wgpu-core
 # platform crates collude to provide platform-specific behavior.
 
+## DX11 backend
+dx11 = ["wgpu-core-deps-windows-linux-android/dx11"]
 ## DX12 backend
 dx12 = ["wgpu-core-deps-windows-linux-android/dx12"]
 ## Metal backend

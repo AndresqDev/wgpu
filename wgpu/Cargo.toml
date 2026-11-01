@@ -48,6 +48,9 @@ default = [
 #! ### Backends
 # --------------------------------------------------------------------
 
+## Enables the DX11 backend on Windows.
+dx11 = ["wgpu-core?/dx11"]
+
 ## Enables the DX12 backend on Windows.
 dx12 = ["wgpu-core?/dx12"]
 
