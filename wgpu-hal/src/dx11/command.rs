@@ -549,10 +549,8 @@ impl crate::CommandEncoder for CommandBuffer {
     where
         T: Iterator<Item = crate::BufferTextureCopy>,
     {
-        if dst.dimension() == wgt::TextureDimension::D3 {
-            log::debug!(
-                "D3D11 volume texture uploads are not implemented; skipping LUT placeholder"
-            );
+        if dst.dimension() != wgt::TextureDimension::D2 {
+            log::debug!("D3D11 non-2D texture uploads are not implemented; skipping placeholder");
             return;
         }
         let format = dst.format();
