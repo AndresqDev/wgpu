@@ -268,6 +268,7 @@ impl Sampler {
         Self { raw }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn raw(&self) -> &Direct3D11::ID3D11SamplerState {
         &self.raw
     }

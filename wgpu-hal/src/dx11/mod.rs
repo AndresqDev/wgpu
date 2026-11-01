@@ -58,6 +58,7 @@ pub use instance::Instance;
 pub use queue::Queue;
 pub use shader::ShaderModule;
 pub use surface::Surface;
+pub(crate) use types::BufferMapMode;
 pub use types::{
     Buffer, Fence, PipelineCache, Resource, Sampler, SurfaceTexture, Texture, TextureView,
 };

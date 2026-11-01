@@ -18,7 +18,7 @@ use windows::Win32::{
     Graphics::{Direct3D11, Dxgi},
 };
 
-use super::{Api, Buffer, BufferMapMode, Texture, TextureView};
+use super::{Api, Buffer, BufferMapMode, Resource, Texture, TextureView};
 
 /// D3D11 requires staging buffer sizes to be a multiple of four bytes.
 fn align_to(value: u64, alignment: u64) -> u64 {
@@ -81,7 +81,9 @@ fn create_staging_buffer(
     unsafe {
         device.CreateBuffer(
             &desc,
-            initial.as_ref().map(|initial| initial as *const _),
+            initial
+                .as_ref()
+                .map(|initial| initial as *const Direct3D11::D3D11_SUBRESOURCE_DATA),
             Some(&mut raw),
         )
     }?;
