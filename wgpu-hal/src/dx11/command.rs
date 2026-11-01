@@ -107,6 +107,7 @@ fn create_staging_texture(
     format: Dxgi::Common::DXGI_FORMAT,
     width: u32,
     height: u32,
+    cpu_access_flags: u32,
 ) -> windows::core::Result<Direct3D11::ID3D11Texture2D> {
     let desc = Direct3D11::D3D11_TEXTURE2D_DESC {
         Width: width,
@@ -120,7 +121,7 @@ fn create_staging_texture(
         },
         Usage: Direct3D11::D3D11_USAGE_STAGING,
         BindFlags: 0,
-        CPUAccessFlags: Direct3D11::D3D11_CPU_ACCESS_READ.0 as u32,
+        CPUAccessFlags: cpu_access_flags,
         MiscFlags: 0,
     };
 
@@ -251,6 +252,16 @@ impl crate::CommandEncoder for CommandBuffer {
         }
 
         let size = range.end - range.start;
+        // D3D11 copies and clears work in 4-byte units; the backend advertises
+        // that alignment, so reject any range that could not be expressed as a
+        // subresource box.
+        if range.start % 4 != 0 || size % 4 != 0 {
+            log::error!(
+                "D3D11 buffer clears require a 4-byte aligned range, got {:?}",
+                range
+            );
+            return;
+        }
         match buffer.map_mode() {
             BufferMapMode::Staging if buffer.cpu_writable() => {
                 let mut mapped = Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
@@ -339,6 +350,17 @@ impl crate::CommandEncoder for CommandBuffer {
         for copy in regions {
             let size = copy.size.get();
             if size == 0 {
+                continue;
+            }
+            // D3D11 expresses buffer copies through a subresource box, whose
+            // coordinates are 32-bit byte offsets, and requires 4-byte
+            // multiples. Reject unaligned copies instead of rounding them.
+            if copy.src_offset % 4 != 0 || copy.dst_offset % 4 != 0 || size % 4 != 0 {
+                log::error!(
+                    "D3D11 buffer copies require 4-byte aligned offsets and size, got {} -> {} with size {size}",
+                    copy.src_offset,
+                    copy.dst_offset
+                );
                 continue;
             }
             if copy.src_offset + size > src.size() || copy.dst_offset + size > dst.size() {
@@ -465,6 +487,20 @@ impl crate::CommandEncoder for CommandBuffer {
         let full_aspects = crate::FormatAspects::from(format);
 
         for copy in regions {
+            // The row-pitch path copies through staging buffers, which D3D11
+            // addresses in 4-byte units.
+            if copy.buffer_layout.offset % 4 != 0
+                || copy
+                    .buffer_layout
+                    .bytes_per_row
+                    .is_some_and(|bytes_per_row| bytes_per_row % 4 != 0)
+            {
+                log::error!(
+                    "D3D11 buffer-to-texture copies require 4-byte aligned offsets and row pitches"
+                );
+                continue;
+            }
+
             let aspect = copy.texture_base.aspect;
             if !aspect.is_one() || aspect != full_aspects {
                 log::error!(
@@ -520,39 +556,103 @@ impl crate::CommandEncoder for CommandBuffer {
                 )
             };
 
-            let mut mapped = Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
+            let dxgi_format = match super::conv::map_texture_format_resource(format) {
+                Some(format) => format,
+                None => {
+                    log::error!("texture format is not supported for D3D11 upload");
+                    continue;
+                }
+            };
+
+            // `UpdateSubresource` cannot target depth-stencil resources, so
+            // stage the rows in a writable staging texture and copy from there.
+            let staging_texture = match create_staging_texture(
+                &self.device,
+                dxgi_format,
+                copy.size.width,
+                copy.size.height,
+                Direct3D11::D3D11_CPU_ACCESS_WRITE.0 as u32,
+            ) {
+                Ok(texture) => texture,
+                Err(e) => {
+                    log::error!("failed to create a staging texture for texture upload: {e}");
+                    continue;
+                }
+            };
+
+            let mut mapped_src = Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
             if let Err(e) = unsafe {
                 self.context.Map(
                     &staging,
                     0,
                     Direct3D11::D3D11_MAP_READ,
                     0,
-                    Some(&mut mapped),
+                    Some(&mut mapped_src),
                 )
             } {
                 log::error!("failed to map the staging buffer for texture upload: {e}");
                 continue;
             }
 
-            let Some(dst_box) = make_box(&copy.texture_base.origin, &copy.size) else {
+            let mut mapped_dst = Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
+            if let Err(e) = unsafe {
+                self.context.Map(
+                    &staging_texture,
+                    0,
+                    Direct3D11::D3D11_MAP_WRITE,
+                    0,
+                    Some(&mut mapped_dst),
+                )
+            } {
                 unsafe { self.context.Unmap(&staging, 0) };
-                log::error!("buffer-to-texture destination box overflowed");
+                log::error!("failed to map the staging texture for texture upload: {e}");
                 continue;
-            };
+            }
+
+            for row in 0..rows as usize {
+                let src_row = unsafe { (mapped_src.pData as *const u8).add(row * pitch as usize) };
+                let dst_row = unsafe {
+                    (mapped_dst.pData as *mut u8).add(row * mapped_dst.RowPitch as usize)
+                };
+                unsafe { ptr::copy_nonoverlapping(src_row, dst_row, row_bytes as usize) };
+            }
 
             unsafe {
-                self.context.UpdateSubresource(
-                    dst.raw(),
-                    dst.subresource_index(
-                        copy.texture_base.mip_level,
-                        copy.texture_base.array_layer,
-                    ),
-                    Some(&dst_box),
-                    mapped.pData as *const c_void,
-                    pitch,
-                    pitch * rows,
-                );
+                self.context.Unmap(&staging_texture, 0);
                 self.context.Unmap(&staging, 0);
+
+                let full_depth_subresource = dst.format().has_depth_aspect()
+                    && dst.mip_level_count() == 1
+                    && dst.array_layer_count() == 1
+                    && copy.texture_base.mip_level == 0
+                    && copy.texture_base.array_layer == 0
+                    && copy.texture_base.origin.x == 0
+                    && copy.texture_base.origin.y == 0
+                    && copy.texture_base.origin.z == 0
+                    && copy.size.width == dst.extent().width
+                    && copy.size.height == dst.extent().height
+                    && copy.size.depth == 1;
+
+                if full_depth_subresource {
+                    // CopySubresourceRegion on a depth-stencil resource must
+                    // copy the whole subresource. CopyResource is the
+                    // whole-resource form and avoids the depth box restriction.
+                    self.context.CopyResource(dst.raw(), &staging_texture);
+                } else {
+                    self.context.CopySubresourceRegion(
+                        dst.raw(),
+                        dst.subresource_index(
+                            copy.texture_base.mip_level,
+                            copy.texture_base.array_layer,
+                        ),
+                        copy.texture_base.origin.x,
+                        copy.texture_base.origin.y,
+                        0,
+                        &staging_texture,
+                        0,
+                        None,
+                    );
+                }
             }
         }
     }
@@ -568,7 +668,7 @@ impl crate::CommandEncoder for CommandBuffer {
     {
         let format = src.format();
         let full_aspects = crate::FormatAspects::from(format);
-        let dxgi_format = match super::conv::map_texture_format(format) {
+        let dxgi_format = match super::conv::map_texture_format_resource(format) {
             Some(format) => format,
             None => {
                 log::error!("texture format is not supported for D3D11 read-back");
@@ -577,6 +677,18 @@ impl crate::CommandEncoder for CommandBuffer {
         };
 
         for copy in regions {
+            if copy.buffer_layout.offset % 4 != 0
+                || copy
+                    .buffer_layout
+                    .bytes_per_row
+                    .is_some_and(|bytes_per_row| bytes_per_row % 4 != 0)
+            {
+                log::error!(
+                    "D3D11 texture-to-buffer copies require 4-byte aligned offsets and row pitches"
+                );
+                continue;
+            }
+
             let aspect = copy.texture_base.aspect;
             if !aspect.is_one() || aspect != full_aspects {
                 log::error!(
@@ -616,6 +728,7 @@ impl crate::CommandEncoder for CommandBuffer {
                 dxgi_format,
                 copy.size.width,
                 copy.size.height,
+                Direct3D11::D3D11_CPU_ACCESS_READ.0 as u32,
             ) {
                 Ok(texture) => texture,
                 Err(e) => {
@@ -624,25 +737,41 @@ impl crate::CommandEncoder for CommandBuffer {
                 }
             };
 
-            let Some(src_box) = make_box(&copy.texture_base.origin, &copy.size) else {
-                log::error!("texture-to-buffer source box overflowed");
-                continue;
-            };
-            unsafe {
-                self.context.CopySubresourceRegion(
-                    &staging_texture,
-                    0,
-                    0,
-                    0,
-                    0,
-                    src.raw(),
-                    src.subresource_index(
-                        copy.texture_base.mip_level,
-                        copy.texture_base.array_layer,
-                    ),
-                    Some(&src_box),
-                )
-            };
+            let full_depth_subresource = src.format().has_depth_aspect()
+                && src.mip_level_count() == 1
+                && src.array_layer_count() == 1
+                && copy.texture_base.mip_level == 0
+                && copy.texture_base.array_layer == 0
+                && copy.texture_base.origin.x == 0
+                && copy.texture_base.origin.y == 0
+                && copy.texture_base.origin.z == 0
+                && copy.size.width == src.extent().width
+                && copy.size.height == src.extent().height
+                && copy.size.depth == 1;
+
+            if full_depth_subresource {
+                unsafe { self.context.CopyResource(&staging_texture, src.raw()) };
+            } else {
+                let Some(src_box) = make_box(&copy.texture_base.origin, &copy.size) else {
+                    log::error!("texture-to-buffer source box overflowed");
+                    continue;
+                };
+                unsafe {
+                    self.context.CopySubresourceRegion(
+                        &staging_texture,
+                        0,
+                        0,
+                        0,
+                        0,
+                        src.raw(),
+                        src.subresource_index(
+                            copy.texture_base.mip_level,
+                            copy.texture_base.array_layer,
+                        ),
+                        Some(&src_box),
+                    )
+                };
+            }
 
             let mut mapped = Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
             if let Err(e) = unsafe {

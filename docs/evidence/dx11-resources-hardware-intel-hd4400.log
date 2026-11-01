@@ -1,0 +1,149 @@
+
+running 1 test
+dx11_resources: enumerated 2 DXGI adapter(s)
+adapter[0] 'Intel(R) HD Graphics 4400' (IntegratedGpu)
+opened D3D11 device on 'Intel(R) HD Graphics 4400' with Features::empty()
+
+=== 1. buffer creation ===
+  created vertex + COPY_DST buffer (64 bytes)
+  created index + COPY_DST buffer (64 bytes)
+  created uniform + COPY_DST buffer (64 bytes)
+  created COPY_SRC + COPY_DST buffer (64 bytes)
+  created indirect + COPY_DST buffer (64 bytes)
+  created MAP_READ + COPY_DST buffer (64 bytes)
+  created MAP_WRITE + COPY_SRC buffer (64 bytes)
+  created dynamic MAP_WRITE + VERTEX buffer (64 bytes)
+  rejected as expected: create_buffer(storage read-only, 64 bytes) (create_buffer(storage read-only): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_buffer(storage read-write, 64 bytes) (create_buffer(storage read-write): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_buffer(MAP_READ + VERTEX, 64 bytes) (create_buffer(MAP_READ + VERTEX): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_buffer(UNIFORM + VERTEX, 64 bytes) (create_buffer(UNIFORM + VERTEX): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_buffer(INDIRECT + MAP_WRITE, 64 bytes) (create_buffer(INDIRECT + MAP_WRITE): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_buffer(size above u32::MAX, 4294967296 bytes) (create_buffer(size above u32::MAX): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_buffer(uniform above 65536 bytes, 65552 bytes) (create_buffer(uniform above 65536 bytes): Unexpected error variant (driver implementation is at fault))
+  buffers: positives and negatives OK
+
+=== 2. buffer mapping ===
+  rejected as expected: map_buffer(staging, while already mapped) (Unexpected error variant (driver implementation is at fault))
+  staging write through map_buffer succeeded
+  staging read-back through map_buffer matched the written bytes
+  rejected as expected: map_buffer(size..size + 1) (Unexpected error variant (driver implementation is at fault))
+  rejected as expected: map_buffer(0..size + 1) (Unexpected error variant (driver implementation is at fault))
+  rejected as expected: map_buffer(8..8) (Unexpected error variant (driver implementation is at fault))
+  rejected as expected: map_buffer(GPU-only buffer) (Unexpected error variant (driver implementation is at fault))
+  rejected as expected: map_buffer(dynamic while already mapped) (Unexpected error variant (driver implementation is at fault))
+  dynamic buffer remap after unmap succeeded
+  mapping: positive and negative cases OK
+
+=== 3. buffer-to-buffer copies ===
+  copy src_offset=8 -> dst_offset=16, size=32 verified
+  whole-buffer CopyResource path verified
+
+=== 4. 2D textures ===
+  created 2D texture with SRV and RTV
+  direct upload at (1,2), offset 64, pitch 256 verified
+  texture-to-texture copy (2,1) -> (1,0), size 3x2 verified
+  Depth32Float 4x4 upload/read-back verified
+
+=== 5. 2D array textures ===
+  D2Array SRV (mip 1, 2 mips, layer 2, 2 layers) and D2 SRV created
+  rejected as expected: D2Array view with layers 3..5 of 4 (create_texture_view(array out-of-range layers): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: D2 view with array_layer_count = None over a 4-layer texture (create_texture_view(array D2 implicit layers): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: D2Array view with mips 2..4 of 3 (create_texture_view(array out-of-range mips): Unexpected error variant (driver implementation is at fault))
+  mip 2 / layer 3 (4x2) upload/read-back verified
+
+=== 6. cubemaps ===
+  cube SRV (6 layers) and cube-array SRV (1 cube) created
+  cube mip 2 / layer 5 (2x2) upload/read-back verified
+  rejected as expected: Cube view with 12 layers (create_texture_view(wide cube 12-layer view): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: Cube view starting at layer 6 (create_texture_view(wide cube offset view): Unexpected error variant (driver implementation is at fault))
+  12-layer cube: Cube rejected, CubeArray at layer 6 accepted
+  rejected as expected: CubeArray view with 3 layers (create_texture_view(cube array 3-layer view): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: Cube view over a non-square texture (create_texture_view(non-square cube view): Unexpected error variant (driver implementation is at fault))
+  non-square cube and non-multiple-of-six cube-array rejected
+
+=== 7. format allowlist matrix ===
+  R8Unorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  R8Snorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  R8Uint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  R8Sint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  Rg8Unorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  Rg8Snorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  Rg8Uint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  Rg8Sint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  Rgba8Unorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  Rgba8UnormSrgb => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  Rgba8Snorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  Rgba8Uint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  Rgba8Sint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  Bgra8Unorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  Bgra8UnormSrgb => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  R16Uint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  R16Sint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  R16Unorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  R16Snorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  R16Float => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  Rg16Uint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  Rg16Sint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  Rg16Float => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  Rgba16Float => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  Rgba16Unorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  Rgba16Snorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  Rgba16Uint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  Rgba16Sint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  R32Uint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  R32Sint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  R32Float => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  Rgba32Float => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  Rgba32Uint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  Rgba32Sint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  Rgb10a2Unorm => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  Rgb10a2Uint => TextureFormatCapabilities(SAMPLED | COLOR_ATTACHMENT | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  Rg11b10Ufloat => TextureFormatCapabilities(SAMPLED | SAMPLED_LINEAR | COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | COLOR_TARGET))
+  Depth16Unorm => TextureFormatCapabilities(SAMPLED | DEPTH_STENCIL_ATTACHMENT | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | DEPTH_STENCIL_READ | DEPTH_STENCIL_WRITE))
+  Depth24Plus => TextureFormatCapabilities(SAMPLED | DEPTH_STENCIL_ATTACHMENT | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | DEPTH_STENCIL_READ | DEPTH_STENCIL_WRITE))
+  Depth24PlusStencil8 => TextureFormatCapabilities(SAMPLED | DEPTH_STENCIL_ATTACHMENT | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | DEPTH_STENCIL_READ | DEPTH_STENCIL_WRITE))
+  Depth32Float => TextureFormatCapabilities(SAMPLED | DEPTH_STENCIL_ATTACHMENT | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | DEPTH_STENCIL_READ | DEPTH_STENCIL_WRITE))
+  Depth32FloatStencil8 => TextureFormatCapabilities(SAMPLED | DEPTH_STENCIL_ATTACHMENT | COPY_SRC | COPY_DST) (TextureUses(COPY_SRC | COPY_DST | RESOURCE | DEPTH_STENCIL_READ | DEPTH_STENCIL_WRITE))
+  rejected as expected: create_texture(Bc1RgbaUnorm) (create_texture(unsupported format): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_texture(Etc2Rgb8Unorm) (create_texture(unsupported format): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_texture(Astc { block: B4x4, channel: Unorm }) (create_texture(unsupported format): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_texture(Stencil8) (create_texture(unsupported format): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_texture(Rgb9e5Ufloat) (create_texture(unsupported format): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_texture(storage usage TextureUses(STORAGE_READ_ONLY)) (create_texture(storage texture): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_texture(storage usage TextureUses(STORAGE_WRITE_ONLY)) (create_texture(storage texture): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_texture(storage usage TextureUses(STORAGE_READ_WRITE)) (create_texture(storage texture): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_texture(view_formats = [Bgra8Unorm]) over Rgba8Unorm (Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_texture_view(Rgba8UnormSrgb over Rgba8Unorm) (create_texture_view(sRGB view over Rgba8Unorm): Unexpected error variant (driver implementation is at fault))
+  view_formats: Bgra8Unorm and Rgba8UnormSrgb rejected (not advertised)
+  rejected as expected: create_texture(width = 0) (create_texture(width = 0): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_texture(height = 0) (create_texture(height = 0): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_texture(array layers = 0) (create_texture(array layers = 0): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_texture(mip levels = 0) (create_texture(mip levels = 0): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_texture(mip levels beyond an 8x8 texture (5)) (create_texture(mip levels beyond an 8x8 texture (5)): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_texture(mip levels beyond a 4x4 texture (4)) (create_texture(too many mips): Unexpected error variant (driver implementation is at fault))
+  format matrix: positives and negatives OK
+
+=== 8. negative texture views ===
+  rejected as expected: create_texture_view(storage usage) (create_texture_view(storage view): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_texture_view(D1) (create_texture_view(D1 view): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_texture_view(D3) (create_texture_view(D3 view): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_texture_view(RTV over depth) (create_texture_view(depth RTV): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_texture_view(DSV over color) (create_texture_view(color DSV): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_texture_view(incompatible format) (create_texture_view(Rgba8Uint view): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_texture_view(base_mip out of range) (create_texture_view(out-of-range mip view): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_texture_view(base_layer out of range) (create_texture_view(out-of-range layer view): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_texture_view(layer range overflow) (create_texture_view(layer overflow view): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_texture_view(no SRV/RTV/DSV usage) (create_texture_view(copy-only view): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_texture_view(Cube as RTV) (create_texture_view(cube RTV): Unexpected error variant (driver implementation is at fault))
+  all unsupported view requests were rejected
+
+=== 9. samplers ===
+  created 21 samplers
+  rejected as expected: create_sampler(anisotropy_clamp = 0) (create_sampler(anisotropy 0): Unexpected error variant (driver implementation is at fault))
+  rejected as expected: create_sampler(anisotropy_clamp = 17) (create_sampler(anisotropy 17): Unexpected error variant (driver implementation is at fault))
+dx11_resources: destroying the queue and device
+dx11_resources: all resource sections passed
+test dx11_resources ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
