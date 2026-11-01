@@ -491,6 +491,12 @@ impl crate::CommandEncoder for CommandBuffer {
     ) where
         T: Iterator<Item = crate::TextureCopy>,
     {
+        if src.dimension() == wgt::TextureDimension::D3
+            || dst.dimension() == wgt::TextureDimension::D3
+        {
+            log::debug!("D3D11 volume texture copies are not implemented; skipping");
+            return;
+        }
         if src.format() != dst.format() {
             log::error!(
                 "D3D11 texture copies require matching formats ({:?} -> {:?})",
@@ -543,6 +549,12 @@ impl crate::CommandEncoder for CommandBuffer {
     where
         T: Iterator<Item = crate::BufferTextureCopy>,
     {
+        if dst.dimension() == wgt::TextureDimension::D3 {
+            log::debug!(
+                "D3D11 volume texture uploads are not implemented; skipping LUT placeholder"
+            );
+            return;
+        }
         let format = dst.format();
         let full_aspects = crate::FormatAspects::from(format);
 
@@ -726,6 +738,10 @@ impl crate::CommandEncoder for CommandBuffer {
     ) where
         T: Iterator<Item = crate::BufferTextureCopy>,
     {
+        if src.dimension() == wgt::TextureDimension::D3 {
+            log::debug!("D3D11 volume texture readback is not implemented; skipping");
+            return;
+        }
         let format = src.format();
         let full_aspects = crate::FormatAspects::from(format);
         let dxgi_format = match super::conv::map_texture_format_resource(format) {

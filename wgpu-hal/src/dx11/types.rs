@@ -186,7 +186,9 @@ impl Borrow<dyn crate::DynBuffer> for Buffer {
 /// A two-dimensional D3D11 texture (including array textures).
 #[derive(Clone, Debug)]
 pub struct Texture {
-    raw: Direct3D11::ID3D11Texture2D,
+    raw: Option<Direct3D11::ID3D11Texture2D>,
+    raw3d: Option<Direct3D11::ID3D11Texture3D>,
+    dimension: wgt::TextureDimension,
     format: wgt::TextureFormat,
     extent: wgt::Extent3d,
     mip_level_count: u32,
@@ -207,7 +209,9 @@ impl Texture {
         usage: wgt::TextureUses,
     ) -> Self {
         Self {
-            raw,
+            raw: Some(raw),
+            raw3d: None,
+            dimension: wgt::TextureDimension::D2,
             format,
             extent,
             mip_level_count,
@@ -215,6 +219,30 @@ impl Texture {
             sample_count,
             usage,
         }
+    }
+
+    pub(crate) fn new3d(
+        raw: Direct3D11::ID3D11Texture3D,
+        format: wgt::TextureFormat,
+        extent: wgt::Extent3d,
+        mip_level_count: u32,
+        usage: wgt::TextureUses,
+    ) -> Self {
+        Self {
+            raw: None,
+            raw3d: Some(raw),
+            dimension: wgt::TextureDimension::D3,
+            format,
+            extent,
+            mip_level_count,
+            array_layer_count: 1,
+            sample_count: 1,
+            usage,
+        }
+    }
+
+    pub fn dimension(&self) -> wgt::TextureDimension {
+        self.dimension
     }
 
     pub fn format(&self) -> wgt::TextureFormat {
@@ -247,7 +275,15 @@ impl Texture {
     }
 
     pub(crate) fn raw(&self) -> &Direct3D11::ID3D11Texture2D {
-        &self.raw
+        self.raw
+            .as_ref()
+            .expect("D3D11 2D texture accessor called for a 3D texture")
+    }
+
+    pub(crate) fn raw3d(&self) -> &Direct3D11::ID3D11Texture3D {
+        self.raw3d
+            .as_ref()
+            .expect("D3D11 3D texture accessor called for a 2D texture")
     }
 }
 
