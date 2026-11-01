@@ -331,10 +331,6 @@ fn section_buffer_creation(device: &wgpu_hal::dx11::Device) -> Result<(), String
             wgt::BufferUses::STORAGE_READ_WRITE,
         ),
         (
-            "storage read-only + MAP_WRITE",
-            wgt::BufferUses::STORAGE_READ_ONLY | wgt::BufferUses::MAP_WRITE,
-        ),
-        (
             "storage read-only + VERTEX",
             wgt::BufferUses::STORAGE_READ_ONLY | wgt::BufferUses::VERTEX,
         ),
@@ -533,8 +529,76 @@ fn section_render_and_readback(
         RED,
     )?;
 
+    // This mirrors `create_buffer_with_data`: wgpu-core marks the buffer with
+    // MAP_WRITE while it stages the initial contents. D3D11 cannot bind a
+    // staging resource as an SRV, so the backend keeps a CPU staging copy and
+    // publishes it on unmap.
+    let mapped_storage = create_buffer(
+        device,
+        "mapped storage",
+        STORAGE_BINDING_SIZE,
+        wgt::BufferUses::STORAGE_READ_ONLY | wgt::BufferUses::MAP_WRITE,
+    )?;
+    let mapping = unsafe { device.map_buffer(&mapped_storage, 0..STORAGE_BINDING_SIZE) }
+        .map_err(|e| format!("map_buffer(mapped storage): {e:?}"))?;
+    let mut initial = [0u8; STORAGE_BINDING_SIZE as usize];
+    initial[0..4].copy_from_slice(&255u32.to_le_bytes());
+    unsafe {
+        core::ptr::copy_nonoverlapping(initial.as_ptr(), mapping.ptr.as_ptr(), initial.len());
+        device.unmap_buffer(&mapped_storage);
+    }
+    println!("  mapped storage buffer initialized through its staging copy");
+
+    let mapped_group = create_storage_group(
+        device,
+        "mapped storage group",
+        bind_group_layout,
+        &mapped_storage,
+        0,
+        STORAGE_BINDING_SIZE,
+    )?;
+    let mapped_target = create_texture(device, "mapped storage target")?;
+    let mapped_view = create_view(device, &mapped_target, "mapped storage RTV")?;
+    submit_encoder(device, queue, "mapped storage draw", |encoder| {
+        let color_attachments = [Some(make_color_attachment(&mapped_view, wgt::Color::BLACK))];
+        let pass = render_pass_descriptor(
+            "mapped storage draw",
+            wgt::Extent3d {
+                width: TARGET_WIDTH,
+                height: TARGET_HEIGHT,
+                depth_or_array_layers: 1,
+            },
+            1,
+            &color_attachments,
+        );
+        unsafe {
+            encoder
+                .begin_render_pass(&pass)
+                .map_err(|e| format!("begin_render_pass(mapped storage draw): {e:?}"))?;
+            encoder.set_render_pipeline(&pipeline);
+            encoder.set_bind_group(pipeline_layout, 0, &mapped_group, &[]);
+            encoder.draw(0, 3, 0, 1);
+            encoder.end_render_pass();
+        }
+        Ok(())
+    })?;
+    let mapped_data = read_texture(
+        device,
+        queue,
+        "mapped storage readback",
+        &mapped_target,
+        TARGET_WIDTH,
+        TARGET_HEIGHT,
+        PITCH,
+    )?;
+    expect_pixel("mapped storage draw", &mapped_data, 0, 0, RED)?;
+
     unsafe {
         device.destroy_render_pipeline(pipeline);
+        device.destroy_texture_view(mapped_view);
+        device.destroy_texture(mapped_target);
+        device.destroy_bind_group(mapped_group);
+        device.destroy_buffer(mapped_storage);
         device.destroy_texture_view(target_view);
         device.destroy_texture(target);
         device.destroy_bind_group(bind_group);

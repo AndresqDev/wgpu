@@ -93,6 +93,9 @@ pub(crate) enum BufferMapMode {
 #[derive(Debug)]
 pub struct Buffer {
     raw: Direct3D11::ID3D11Buffer,
+    /// CPU staging copy used when a GPU-visible buffer also needs mapping
+    /// (for example `create_buffer_with_data` on a storage buffer).
+    staging: Option<Direct3D11::ID3D11Buffer>,
     size: wgt::BufferAddress,
     usage: wgt::BufferUses,
     map_mode: BufferMapMode,
@@ -104,6 +107,7 @@ pub struct Buffer {
 impl Buffer {
     pub(crate) fn new(
         raw: Direct3D11::ID3D11Buffer,
+        staging: Option<Direct3D11::ID3D11Buffer>,
         size: wgt::BufferAddress,
         usage: wgt::BufferUses,
         map_mode: BufferMapMode,
@@ -112,6 +116,7 @@ impl Buffer {
     ) -> Self {
         Self {
             raw,
+            staging,
             size,
             usage,
             map_mode,
@@ -154,9 +159,14 @@ impl Buffer {
         &self.raw
     }
 
+    pub(crate) fn staging(&self) -> Option<&Direct3D11::ID3D11Buffer> {
+        self.staging.as_ref()
+    }
+
     pub(crate) fn clone_for_binding(&self) -> Self {
         Self {
             raw: self.raw.clone(),
+            staging: self.staging.clone(),
             size: self.size,
             usage: self.usage,
             map_mode: self.map_mode,
