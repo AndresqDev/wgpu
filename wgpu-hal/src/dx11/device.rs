@@ -1043,6 +1043,7 @@ impl crate::Device for Device {
         buffer: &Buffer,
         range: crate::MemoryRange,
     ) -> Result<crate::BufferMapping, crate::DeviceError> {
+        let _context_guard = super::command::ContextGuard::acquire();
         if range.start >= range.end || range.end > buffer.size() {
             return Err(unexpected(
                 "D3D11 buffer mapping range is outside the buffer",
@@ -1120,6 +1121,7 @@ impl crate::Device for Device {
     }
 
     unsafe fn unmap_buffer(&self, buffer: &Buffer) {
+        let _context_guard = super::command::ContextGuard::acquire();
         if !buffer.set_unmapped() {
             log::warn!("unmap_buffer called for a D3D11 buffer that was not mapped");
             return;

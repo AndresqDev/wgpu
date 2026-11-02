@@ -19,6 +19,7 @@
 use alloc::{borrow::ToOwned, format, string::String, vec::Vec};
 use core::{ffi::c_void, ops::Range, ptr};
 
+use parking_lot::lock_api::RawMutex as _;
 use windows::{
     core::Interface as _,
     Win32::{
@@ -31,6 +32,30 @@ use super::{
     Api, BindGroup, Buffer, BufferMapMode, PipelineLayout, RenderPipeline, Resource, Texture,
     TextureView,
 };
+
+/// Serializes access to the immediate D3D11 context.
+///
+/// wgpu command encoders may be recorded on worker threads. The immediate
+/// context is not thread-safe, and this backend executes commands while they
+/// are recorded, so all context users must hold this lock.
+pub(crate) static CONTEXT_LOCK: parking_lot::RawMutex = parking_lot::RawMutex::INIT;
+
+/// Owned guard for [`CONTEXT_LOCK`].
+#[derive(Debug)]
+pub(crate) struct ContextGuard;
+
+impl ContextGuard {
+    pub(crate) fn acquire() -> Self {
+        CONTEXT_LOCK.lock();
+        Self
+    }
+}
+
+impl Drop for ContextGuard {
+    fn drop(&mut self) {
+        unsafe { CONTEXT_LOCK.unlock() };
+    }
+}
 
 /// D3D11 requires staging buffer sizes to be a multiple of four bytes.
 fn align_to(value: u64, alignment: u64) -> u64 {
@@ -212,6 +237,10 @@ impl RenderPassState {
 pub struct CommandBuffer {
     context: Direct3D11::ID3D11DeviceContext,
     context1: Option<Direct3D11::ID3D11DeviceContext1>,
+    /// Held for the complete encoding so commands cannot race on the shared
+    /// immediate context. Released by `end_encoding`, `discard_encoding`, or
+    /// `Drop`.
+    context_guard: Option<ContextGuard>,
     device: Direct3D11::ID3D11Device,
     current_pipeline: Option<PipelineState>,
     current_blend_state: Option<Direct3D11::ID3D11BlendState>,
@@ -236,6 +265,7 @@ impl CommandBuffer {
         Self {
             context,
             context1,
+            context_guard: None,
             device,
             current_pipeline: None,
             current_blend_state: None,
@@ -263,6 +293,9 @@ impl crate::CommandEncoder for CommandBuffer {
     type A = Api;
 
     unsafe fn begin_encoding(&mut self, _label: crate::Label) -> Result<(), crate::DeviceError> {
+        if self.context_guard.is_none() {
+            self.context_guard = Some(ContextGuard::acquire());
+        }
         self.error = None;
         self.render_pass = None;
         self.current_pipeline = None;
@@ -271,6 +304,7 @@ impl crate::CommandEncoder for CommandBuffer {
     }
 
     unsafe fn discard_encoding(&mut self) {
+        self.context_guard.take();
         self.error = None;
         self.render_pass = None;
         self.current_pipeline = None;
@@ -278,6 +312,9 @@ impl crate::CommandEncoder for CommandBuffer {
     }
 
     unsafe fn end_encoding(&mut self) -> Result<CommandBuffer, crate::DeviceError> {
+        // Commands are already in the immediate context; release the recorder
+        // lock before handing the flush-only buffer to the queue.
+        self.context_guard.take();
         if let Some(error) = &self.error {
             log::error!("D3D11 command encoding failed: {error}");
             return Err(crate::DeviceError::Unexpected);
