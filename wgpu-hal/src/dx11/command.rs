@@ -21,8 +21,10 @@ use core::{
     ffi::c_void,
     ops::{Deref, Range},
     ptr,
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
+use parking_lot::lock_api::RawMutex as _;
 use windows::{
     core::Interface as _,
     Win32::{
@@ -37,14 +39,54 @@ use super::{
 };
 
 /// Serializes access to the immediate D3D11 context.
-static CONTEXT_LOCK: parking_lot::ReentrantMutex<()> = parking_lot::const_reentrant_mutex(());
+///
+/// Commands execute while they are recorded, so the lock is held for the
+/// complete command-buffer encoding. Nesting is allowed because wgpu-core
+/// records internal uploads on the same thread while a caller encoder is open.
+static CONTEXT_LOCK: parking_lot::RawMutex = parking_lot::RawMutex::INIT;
+static CONTEXT_OWNER: AtomicUsize = AtomicUsize::new(0);
+static CONTEXT_DEPTH: AtomicUsize = AtomicUsize::new(0);
 
-pub(crate) fn lock_context() -> parking_lot::ReentrantMutexGuard<'static, ()> {
-    CONTEXT_LOCK.lock()
+thread_local! {
+    static CONTEXT_THREAD_KEY: u8 = 0;
+}
+
+fn context_thread_id() -> usize {
+    CONTEXT_THREAD_KEY.with(|key| key as *const u8 as usize)
+}
+
+#[derive(Debug)]
+pub(crate) struct ContextGuard;
+
+impl ContextGuard {
+    pub(crate) fn acquire() -> Self {
+        let id = context_thread_id();
+        if CONTEXT_OWNER.load(Ordering::Acquire) == id {
+            CONTEXT_DEPTH.fetch_add(1, Ordering::AcqRel);
+        } else {
+            CONTEXT_LOCK.lock();
+            CONTEXT_OWNER.store(id, Ordering::Release);
+            CONTEXT_DEPTH.store(1, Ordering::Release);
+        }
+        Self
+    }
+}
+
+impl Drop for ContextGuard {
+    fn drop(&mut self) {
+        if CONTEXT_DEPTH.fetch_sub(1, Ordering::AcqRel) == 1 {
+            CONTEXT_OWNER.store(0, Ordering::Release);
+            unsafe { CONTEXT_LOCK.unlock() };
+        }
+    }
+}
+
+pub(crate) fn lock_context() -> ContextGuard {
+    ContextGuard::acquire()
 }
 
 struct ContextRef<'a> {
-    _guard: parking_lot::ReentrantMutexGuard<'static, ()>,
+    _guard: ContextGuard,
     raw: &'a Direct3D11::ID3D11DeviceContext,
 }
 
@@ -57,7 +99,7 @@ impl Deref for ContextRef<'_> {
 }
 
 struct Context1Ref<'a> {
-    _guard: parking_lot::ReentrantMutexGuard<'static, ()>,
+    _guard: ContextGuard,
     raw: &'a Direct3D11::ID3D11DeviceContext1,
 }
 
@@ -249,6 +291,7 @@ impl RenderPassState {
 pub struct CommandBuffer {
     raw_context: Direct3D11::ID3D11DeviceContext,
     raw_context1: Option<Direct3D11::ID3D11DeviceContext1>,
+    context_guard: Option<ContextGuard>,
     device: Direct3D11::ID3D11Device,
     current_pipeline: Option<PipelineState>,
     current_blend_state: Option<Direct3D11::ID3D11BlendState>,
@@ -273,6 +316,7 @@ impl CommandBuffer {
         Self {
             raw_context: context,
             raw_context1,
+            context_guard: None,
             device,
             current_pipeline: None,
             current_blend_state: None,
@@ -288,13 +332,13 @@ impl CommandBuffer {
 
     fn context(&self) -> ContextRef<'_> {
         ContextRef {
-            _guard: CONTEXT_LOCK.lock(),
+            _guard: lock_context(),
             raw: &self.raw_context,
         }
     }
 
     fn context1(&self) -> Option<Context1Ref<'_>> {
-        let guard = CONTEXT_LOCK.lock();
+        let guard = lock_context();
         self.raw_context1
             .as_ref()
             .map(move |raw| Context1Ref { _guard: guard, raw })
@@ -314,6 +358,9 @@ impl crate::CommandEncoder for CommandBuffer {
     type A = Api;
 
     unsafe fn begin_encoding(&mut self, _label: crate::Label) -> Result<(), crate::DeviceError> {
+        if self.context_guard.is_none() {
+            self.context_guard = Some(ContextGuard::acquire());
+        }
         self.error = None;
         self.render_pass = None;
         self.current_pipeline = None;
@@ -322,6 +369,7 @@ impl crate::CommandEncoder for CommandBuffer {
     }
 
     unsafe fn discard_encoding(&mut self) {
+        self.context_guard.take();
         self.error = None;
         self.render_pass = None;
         self.current_pipeline = None;
@@ -329,6 +377,7 @@ impl crate::CommandEncoder for CommandBuffer {
     }
 
     unsafe fn end_encoding(&mut self) -> Result<CommandBuffer, crate::DeviceError> {
+        self.context_guard.take();
         if let Some(error) = &self.error {
             log::error!("D3D11 command encoding failed: {error}");
             return Err(crate::DeviceError::Unexpected);
