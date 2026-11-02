@@ -1015,13 +1015,19 @@ impl crate::Device for Device {
             desc.size
         );
 
+        // D3D11 staging buffers used for MAP_WRITE uploads are also created
+        // with CPU_ACCESS_READ so copy_buffer_to_texture can map them instead
+        // of issuing a GPU buffer-to-buffer copy. This is an internal HAL
+        // capability; wgpu-core still enforces the public BufferUsages mask.
+        let cpu_readable = usage.contains(wgt::BufferUses::MAP_READ)
+            || matches!(&map_mode, BufferMapMode::Staging);
         Ok(Buffer::new(
             raw,
             staging,
             desc.size,
             usage,
             map_mode,
-            usage.contains(wgt::BufferUses::MAP_READ),
+            cpu_readable,
             usage.contains(wgt::BufferUses::MAP_WRITE),
         ))
     }
