@@ -767,8 +767,7 @@ fn check_surface_capabilities(
         caps.composite_alpha_modes
     );
     println!(
-        "  surface maximum_frame_latency: {:?} (LIMITATION: Surface::configure does not \
-         enforce this range; it is recorded, not asserted)",
+        "  surface maximum_frame_latency: {:?} (applied through IDXGISwapChain2 when available)",
         caps.maximum_frame_latency
     );
 
@@ -798,7 +797,7 @@ fn check_surface_capabilities(
         ));
     }
 
-    let expected_present = [wgt::PresentMode::Fifo, wgt::PresentMode::Immediate];
+    let expected_present = [wgt::PresentMode::Fifo];
     if !is_same_set(&caps.present_modes, &expected_present) {
         failures.push(format!(
             "{label}: surface present modes {:?} are not exactly {:?}",

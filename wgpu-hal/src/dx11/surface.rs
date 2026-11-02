@@ -11,8 +11,9 @@
 //! of calling `ResizeBuffers`: the HAL contract guarantees that no acquired
 //! textures are alive during [`crate::Surface::configure`], so no back-buffer
 //! reference can outlive the old chain. The `raw-dx11-resize` example exercises
-//! this path. `maximum_frame_latency` is accepted but not enforced here; DXGI
-//! uses its own frame-latency queue for flip-model chains.
+//! this path. `maximum_frame_latency` is applied through
+//! `IDXGISwapChain2::SetMaximumFrameLatency` when that interface is available;
+//! otherwise DXGI keeps its default frame-latency queue.
 
 use alloc::vec::Vec;
 use core::{fmt, time::Duration};
@@ -172,6 +173,7 @@ fn create_swapchain(
     desc: &Dxgi::DXGI_SWAP_CHAIN_DESC1,
     srgb_view: bool,
     present_interval: u32,
+    maximum_frame_latency: u32,
 ) -> Result<SwapChain, crate::SurfaceError> {
     profiling::scope!("IDXGIFactory2::CreateSwapChainForHwnd");
     let raw =
@@ -180,6 +182,22 @@ fn create_swapchain(
                 log::error!("failed to create the D3D11 swap chain: {e}");
                 crate::SurfaceError::Other("D3D11 swap-chain creation failed")
             })?;
+
+    // DXGI's default queue can run one frame ahead. Cinnabar requests a
+    // smaller window for synchronized presentation; apply it explicitly when
+    // the Windows 8+ interface is present. Failure is not fatal: the default
+    // DXGI queue is still a valid fallback.
+    if let Ok(raw2) = raw.cast::<Dxgi::IDXGISwapChain2>() {
+        if let Err(e) = unsafe { raw2.SetMaximumFrameLatency(maximum_frame_latency) } {
+            log::warn!(
+                "IDXGISwapChain2::SetMaximumFrameLatency({maximum_frame_latency}) failed: {e}"
+            );
+        }
+    } else {
+        log::warn!(
+            "IDXGISwapChain2 is unavailable; maximum_frame_latency={maximum_frame_latency} is not applied"
+        );
+    }
 
     // `IDXGISwapChain3::GetCurrentBackBufferIndex` is the only reliable way
     // to know which flip-model buffer is the current one. It is available
@@ -366,6 +384,7 @@ impl crate::Surface for Surface {
             &desc,
             srgb_view,
             present_interval,
+            config.maximum_frame_latency,
         ) {
             Ok(swapchain) => swapchain,
             Err(first_error) => {
@@ -386,6 +405,7 @@ impl crate::Surface for Surface {
                     &desc,
                     srgb_view,
                     present_interval,
+                    config.maximum_frame_latency,
                 )
                 .map_err(|e| {
                     log::error!("failed to create a compatible D3D11 swap chain: {e:?}");

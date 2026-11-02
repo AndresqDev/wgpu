@@ -88,8 +88,10 @@ provides compilable stubs for the rest of the `wgpu-hal` API.
   resource creation and mapping turn a removal discovered through
   `GetDeviceRemovedReason` into `DeviceError::Lost` instead of an unexpected
   error.
-- `maximum_frame_latency` is accepted by `Surface::configure` but not enforced;
-  DXGI uses its own frame-latency queue for flip-model swap chains.
+- `maximum_frame_latency` is applied through
+  `IDXGISwapChain2::SetMaximumFrameLatency` when available. `PresentMode::Immediate`
+  is intentionally not advertised until the present/back-buffer path has a
+  dedicated validation matrix.
 
 ## Next steps
 

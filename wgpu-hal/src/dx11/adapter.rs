@@ -351,13 +351,15 @@ impl crate::Adapter for Adapter {
 
         Some(crate::SurfaceCapabilities {
             formats,
-            // Advertised for API completeness only: `configure` ignores the
-            // requested latency, so this value is not enforced. Documented
-            // limitation, not a verified capability.
+            // `Surface::configure` applies this through
+            // `IDXGISwapChain2::SetMaximumFrameLatency` when available.
             maximum_frame_latency: 1..=2,
             current_extent: None,
             usage: wgt::TextureUses::COLOR_TARGET,
-            present_modes: alloc::vec![wgt::PresentMode::Fifo, wgt::PresentMode::Immediate,],
+            // Immediate mode was the mode used by the 2026-11-01 host GPU
+            // hang. Keep it out of the advertised set until the present and
+            // back-buffer path has a dedicated validation matrix.
+            present_modes: alloc::vec![wgt::PresentMode::Fifo],
             composite_alpha_modes: alloc::vec![wgt::CompositeAlphaMode::Opaque],
         })
     }
