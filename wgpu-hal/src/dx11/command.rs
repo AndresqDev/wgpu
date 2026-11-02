@@ -601,6 +601,95 @@ impl crate::CommandEncoder for CommandBuffer {
                 continue;
             }
 
+            // Validate the destination before issuing a D3D11 copy. An
+            // out-of-range subresource or box is undefined in D3D11 and can
+            // remove the device rather than returning an error.
+            let dst_extent = dst.extent();
+            let within_destination = copy
+                .texture_base
+                .origin
+                .x
+                .checked_add(copy.size.width)
+                .is_some_and(|right| right <= dst_extent.width)
+                && copy
+                    .texture_base
+                    .origin
+                    .y
+                    .checked_add(copy.size.height)
+                    .is_some_and(|bottom| bottom <= dst_extent.height);
+            if copy.size.width == 0
+                || copy.size.height == 0
+                || copy.texture_base.mip_level >= dst.mip_level_count()
+                || copy.texture_base.array_layer >= dst.array_layer_count()
+                || !within_destination
+            {
+                log::error!(
+                    "invalid D3D11 buffer-to-texture destination: format={format:?}, mip={}, layer={} (of {}), origin=({}, {}), size={}x{}, extent={}x{}",
+                    copy.texture_base.mip_level,
+                    copy.texture_base.array_layer,
+                    dst.array_layer_count(),
+                    copy.texture_base.origin.x,
+                    copy.texture_base.origin.y,
+                    copy.size.width,
+                    copy.size.height,
+                    dst_extent.width,
+                    dst_extent.height
+                );
+                continue;
+            }
+
+            // Queue uploads are backed by a CPU-readable staging buffer. Copy
+            // directly from that mapping into a DEFAULT colour texture with
+            // UpdateSubresource. This avoids an unnecessary GPU buffer copy
+            // and the staging-texture round trip for the common upload path.
+            let is_default_color_texture = !dst.format().has_depth_aspect();
+            if is_default_color_texture && src.cpu_readable() && !src.set_mapped() {
+                log::error!(
+                    "D3D11 buffer-to-texture source is already mapped; refusing an invalid copy"
+                );
+                continue;
+            }
+            if is_default_color_texture && src.cpu_readable() {
+                let map_raw = src.staging().unwrap_or_else(|| src.raw());
+                let mut mapped_src = Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
+                let mapped = unsafe {
+                    self.context.Map(
+                        map_raw,
+                        0,
+                        Direct3D11::D3D11_MAP_READ,
+                        0,
+                        Some(&mut mapped_src),
+                    )
+                };
+                if mapped.is_ok() && !mapped_src.pData.is_null() {
+                    if let Some(dst_box) = make_box(&copy.texture_base.origin, &copy.size) {
+                        let source = unsafe {
+                            (mapped_src.pData as *const u8).add(copy.buffer_layout.offset as usize)
+                        };
+                        unsafe {
+                            self.context.UpdateSubresource(
+                                dst.raw(),
+                                dst.subresource_index(
+                                    copy.texture_base.mip_level,
+                                    copy.texture_base.array_layer,
+                                ),
+                                Some(&dst_box),
+                                source.cast(),
+                                pitch,
+                                pitch.saturating_mul(rows),
+                            );
+                            self.context.Unmap(map_raw, 0);
+                        }
+                        src.set_unmapped();
+                        continue;
+                    }
+                } else if let Err(error) = mapped {
+                    log::warn!("failed to map the CPU upload buffer for texture upload: {error}");
+                }
+                unsafe { self.context.Unmap(map_raw, 0) };
+                src.set_unmapped();
+            }
+
             let staging = match create_staging_buffer(&self.device, data_size, None) {
                 Ok(staging) => staging,
                 Err(e) => {
