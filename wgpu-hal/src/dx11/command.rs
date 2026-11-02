@@ -673,7 +673,7 @@ impl crate::CommandEncoder for CommandBuffer {
                                     copy.texture_base.mip_level,
                                     copy.texture_base.array_layer,
                                 ),
-                                Some(&dst_box),
+                                Some(&dst_box as *const Direct3D11::D3D11_BOX),
                                 source.cast(),
                                 pitch,
                                 pitch.saturating_mul(rows),
