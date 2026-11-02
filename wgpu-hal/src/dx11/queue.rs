@@ -283,7 +283,7 @@ impl crate::Queue for Queue {
     ) -> Result<(), crate::DeviceError> {
         // The immediate context is shared with command encoding and is not
         // thread-safe. Hold the same lock while flushing and arming markers.
-        let _context_guard = super::command::ContextGuard::acquire();
+        let _context_guard = super::command::lock_context();
         // Render-pass clears are executed immediately on the shared immediate
         // context, so submission only has to flush the context. Deferred
         // contexts and ordered command-list execution are the next milestone.
@@ -362,7 +362,7 @@ impl crate::Queue for Queue {
     }
 
     unsafe fn wait_for_idle(&self) -> Result<(), crate::DeviceError> {
-        let _context_guard = super::command::ContextGuard::acquire();
+        let _context_guard = super::command::lock_context();
         let query = self.event_query()?;
 
         if let Some(error) = device_removed(&self.device) {

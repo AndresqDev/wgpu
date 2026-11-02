@@ -17,9 +17,12 @@
 //! submitting a draw that silently reads zeros.
 
 use alloc::{borrow::ToOwned, format, string::String, vec::Vec};
-use core::{ffi::c_void, ops::Range, ptr};
+use core::{
+    ffi::c_void,
+    ops::{Deref, Range},
+    ptr,
+};
 
-use parking_lot::lock_api::RawMutex as _;
 use windows::{
     core::Interface as _,
     Win32::{
@@ -34,26 +37,35 @@ use super::{
 };
 
 /// Serializes access to the immediate D3D11 context.
-///
-/// wgpu command encoders may be recorded on worker threads. The immediate
-/// context is not thread-safe, and this backend executes commands while they
-/// are recorded, so all context users must hold this lock.
-pub(crate) static CONTEXT_LOCK: parking_lot::RawMutex = parking_lot::RawMutex::INIT;
+static CONTEXT_LOCK: parking_lot::ReentrantMutex<()> = parking_lot::const_reentrant_mutex(());
 
-/// Owned guard for [`CONTEXT_LOCK`].
-#[derive(Debug)]
-pub(crate) struct ContextGuard;
+pub(crate) fn lock_context() -> parking_lot::ReentrantMutexGuard<'static, ()> {
+    CONTEXT_LOCK.lock()
+}
 
-impl ContextGuard {
-    pub(crate) fn acquire() -> Self {
-        CONTEXT_LOCK.lock();
-        Self
+struct ContextRef<'a> {
+    _guard: parking_lot::ReentrantMutexGuard<'static, ()>,
+    raw: &'a Direct3D11::ID3D11DeviceContext,
+}
+
+impl Deref for ContextRef<'_> {
+    type Target = Direct3D11::ID3D11DeviceContext;
+
+    fn deref(&self) -> &Self::Target {
+        self.raw
     }
 }
 
-impl Drop for ContextGuard {
-    fn drop(&mut self) {
-        unsafe { CONTEXT_LOCK.unlock() };
+struct Context1Ref<'a> {
+    _guard: parking_lot::ReentrantMutexGuard<'static, ()>,
+    raw: &'a Direct3D11::ID3D11DeviceContext1,
+}
+
+impl Deref for Context1Ref<'_> {
+    type Target = Direct3D11::ID3D11DeviceContext1;
+
+    fn deref(&self) -> &Self::Target {
+        self.raw
     }
 }
 
@@ -235,12 +247,8 @@ impl RenderPassState {
 /// lists are implemented.
 #[derive(Debug)]
 pub struct CommandBuffer {
-    context: Direct3D11::ID3D11DeviceContext,
-    context1: Option<Direct3D11::ID3D11DeviceContext1>,
-    /// Held for the complete encoding so commands cannot race on the shared
-    /// immediate context. Released by `end_encoding`, `discard_encoding`, or
-    /// `Drop`.
-    context_guard: Option<ContextGuard>,
+    raw_context: Direct3D11::ID3D11DeviceContext,
+    raw_context1: Option<Direct3D11::ID3D11DeviceContext1>,
     device: Direct3D11::ID3D11Device,
     current_pipeline: Option<PipelineState>,
     current_blend_state: Option<Direct3D11::ID3D11BlendState>,
@@ -261,11 +269,10 @@ impl CommandBuffer {
         context: Direct3D11::ID3D11DeviceContext,
         device: Direct3D11::ID3D11Device,
     ) -> Self {
-        let context1 = context.cast::<Direct3D11::ID3D11DeviceContext1>().ok();
+        let raw_context1 = context.cast::<Direct3D11::ID3D11DeviceContext1>().ok();
         Self {
-            context,
-            context1,
-            context_guard: None,
+            raw_context: context,
+            raw_context1,
             device,
             current_pipeline: None,
             current_blend_state: None,
@@ -277,6 +284,20 @@ impl CommandBuffer {
             index_buffer_set: false,
             error: None,
         }
+    }
+
+    fn context(&self) -> ContextRef<'_> {
+        ContextRef {
+            _guard: CONTEXT_LOCK.lock(),
+            raw: &self.raw_context,
+        }
+    }
+
+    fn context1(&self) -> Option<Context1Ref<'_>> {
+        let guard = CONTEXT_LOCK.lock();
+        self.raw_context1
+            .as_ref()
+            .map(move |raw| Context1Ref { _guard: guard, raw })
     }
 
     /// Records the first explicit encoding error so [`crate::CommandEncoder::end_encoding`]
@@ -293,9 +314,6 @@ impl crate::CommandEncoder for CommandBuffer {
     type A = Api;
 
     unsafe fn begin_encoding(&mut self, _label: crate::Label) -> Result<(), crate::DeviceError> {
-        if self.context_guard.is_none() {
-            self.context_guard = Some(ContextGuard::acquire());
-        }
         self.error = None;
         self.render_pass = None;
         self.current_pipeline = None;
@@ -304,7 +322,6 @@ impl crate::CommandEncoder for CommandBuffer {
     }
 
     unsafe fn discard_encoding(&mut self) {
-        self.context_guard.take();
         self.error = None;
         self.render_pass = None;
         self.current_pipeline = None;
@@ -312,9 +329,6 @@ impl crate::CommandEncoder for CommandBuffer {
     }
 
     unsafe fn end_encoding(&mut self) -> Result<CommandBuffer, crate::DeviceError> {
-        // Commands are already in the immediate context; release the recorder
-        // lock before handing the flush-only buffer to the queue.
-        self.context_guard.take();
         if let Some(error) = &self.error {
             log::error!("D3D11 command encoding failed: {error}");
             return Err(crate::DeviceError::Unexpected);
@@ -323,7 +337,7 @@ impl crate::CommandEncoder for CommandBuffer {
         // context, so the returned buffer only has to carry the context forward
         // for `Queue::submit` (which currently just flushes).
         Ok(CommandBuffer::new(
-            self.context.clone(),
+            self.raw_context.clone(),
             self.device.clone(),
         ))
     }
@@ -363,7 +377,7 @@ impl crate::CommandEncoder for CommandBuffer {
             BufferMapMode::Staging if buffer.cpu_writable() => {
                 let mut mapped = Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
                 let result = unsafe {
-                    self.context.Map(
+                    self.context().Map(
                         buffer.raw(),
                         0,
                         Direct3D11::D3D11_MAP_WRITE,
@@ -381,7 +395,7 @@ impl crate::CommandEncoder for CommandBuffer {
                         0,
                         size as usize,
                     );
-                    self.context.Unmap(buffer.raw(), 0);
+                    self.context().Unmap(buffer.raw(), 0);
                 }
             }
             BufferMapMode::Dynamic if buffer.cpu_writable() => {
@@ -393,7 +407,7 @@ impl crate::CommandEncoder for CommandBuffer {
                 );
                 let mut mapped = Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
                 let result = unsafe {
-                    self.context.Map(
+                    self.context().Map(
                         buffer.raw(),
                         0,
                         Direct3D11::D3D11_MAP_WRITE_DISCARD,
@@ -407,7 +421,7 @@ impl crate::CommandEncoder for CommandBuffer {
                 }
                 unsafe {
                     ptr::write_bytes(mapped.pData as *mut u8, 0, buffer.size() as usize);
-                    self.context.Unmap(buffer.raw(), 0);
+                    self.context().Unmap(buffer.raw(), 0);
                 }
             }
             _ => {
@@ -425,7 +439,7 @@ impl crate::CommandEncoder for CommandBuffer {
                     return;
                 };
                 unsafe {
-                    self.context.CopySubresourceRegion(
+                    self.context().CopySubresourceRegion(
                         buffer.raw(),
                         0,
                         range.start as u32,
@@ -479,7 +493,7 @@ impl crate::CommandEncoder for CommandBuffer {
                 && size == dst.size()
                 && src.map_mode() != BufferMapMode::Dynamic
             {
-                unsafe { self.context.CopyResource(dst.raw(), src.raw()) };
+                unsafe { self.context().CopyResource(dst.raw(), src.raw()) };
                 continue;
             }
 
@@ -493,7 +507,7 @@ impl crate::CommandEncoder for CommandBuffer {
             };
 
             unsafe {
-                self.context.CopySubresourceRegion(
+                self.context().CopySubresourceRegion(
                     dst.raw(),
                     0,
                     dst_x,
@@ -568,7 +582,7 @@ impl crate::CommandEncoder for CommandBuffer {
             };
 
             unsafe {
-                self.context.CopySubresourceRegion(
+                self.context().CopySubresourceRegion(
                     dst.raw(),
                     dst.subresource_index(copy.dst_base.mip_level, copy.dst_base.array_layer),
                     copy.dst_base.origin.x,
@@ -690,7 +704,7 @@ impl crate::CommandEncoder for CommandBuffer {
                 let map_raw = src.staging().unwrap_or_else(|| src.raw());
                 let mut mapped_src = Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
                 let mapped = unsafe {
-                    self.context.Map(
+                    self.context().Map(
                         map_raw,
                         0,
                         Direct3D11::D3D11_MAP_READ,
@@ -704,7 +718,7 @@ impl crate::CommandEncoder for CommandBuffer {
                             (mapped_src.pData as *const u8).add(copy.buffer_layout.offset as usize)
                         };
                         unsafe {
-                            self.context.UpdateSubresource(
+                            self.context().UpdateSubresource(
                                 dst.raw(),
                                 dst.subresource_index(
                                     copy.texture_base.mip_level,
@@ -715,7 +729,7 @@ impl crate::CommandEncoder for CommandBuffer {
                                 pitch,
                                 pitch.saturating_mul(rows),
                             );
-                            self.context.Unmap(map_raw, 0);
+                            self.context().Unmap(map_raw, 0);
                         }
                         src.set_unmapped();
                         continue;
@@ -723,7 +737,7 @@ impl crate::CommandEncoder for CommandBuffer {
                 } else if let Err(error) = mapped {
                     log::warn!("failed to map the CPU upload buffer for texture upload: {error}");
                 }
-                unsafe { self.context.Unmap(map_raw, 0) };
+                unsafe { self.context().Unmap(map_raw, 0) };
                 src.set_unmapped();
             }
 
@@ -740,7 +754,7 @@ impl crate::CommandEncoder for CommandBuffer {
                 continue;
             };
             unsafe {
-                self.context.CopySubresourceRegion(
+                self.context().CopySubresourceRegion(
                     &staging,
                     0,
                     0,
@@ -778,7 +792,7 @@ impl crate::CommandEncoder for CommandBuffer {
 
             let mut mapped_src = Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
             if let Err(e) = unsafe {
-                self.context.Map(
+                self.context().Map(
                     &staging,
                     0,
                     Direct3D11::D3D11_MAP_READ,
@@ -792,7 +806,7 @@ impl crate::CommandEncoder for CommandBuffer {
 
             let mut mapped_dst = Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
             if let Err(e) = unsafe {
-                self.context.Map(
+                self.context().Map(
                     &staging_texture,
                     0,
                     Direct3D11::D3D11_MAP_WRITE,
@@ -800,7 +814,7 @@ impl crate::CommandEncoder for CommandBuffer {
                     Some(&mut mapped_dst),
                 )
             } {
-                unsafe { self.context.Unmap(&staging, 0) };
+                unsafe { self.context().Unmap(&staging, 0) };
                 log::error!("failed to map the staging texture for texture upload: {e}");
                 continue;
             }
@@ -814,8 +828,8 @@ impl crate::CommandEncoder for CommandBuffer {
             }
 
             unsafe {
-                self.context.Unmap(&staging_texture, 0);
-                self.context.Unmap(&staging, 0);
+                self.context().Unmap(&staging_texture, 0);
+                self.context().Unmap(&staging, 0);
 
                 let full_depth_subresource = dst.format().has_depth_aspect()
                     && dst.mip_level_count() == 1
@@ -833,9 +847,9 @@ impl crate::CommandEncoder for CommandBuffer {
                     // CopySubresourceRegion on a depth-stencil resource must
                     // copy the whole subresource. CopyResource is the
                     // whole-resource form and avoids the depth box restriction.
-                    self.context.CopyResource(dst.raw(), &staging_texture);
+                    self.context().CopyResource(dst.raw(), &staging_texture);
                 } else {
-                    self.context.CopySubresourceRegion(
+                    self.context().CopySubresourceRegion(
                         dst.raw(),
                         dst.subresource_index(
                             copy.texture_base.mip_level,
@@ -950,14 +964,14 @@ impl crate::CommandEncoder for CommandBuffer {
                 && copy.size.depth == 1;
 
             if full_depth_subresource {
-                unsafe { self.context.CopyResource(&staging_texture, src.raw()) };
+                unsafe { self.context().CopyResource(&staging_texture, src.raw()) };
             } else {
                 let Some(src_box) = make_box(&copy.texture_base.origin, &copy.size) else {
                     log::error!("texture-to-buffer source box overflowed");
                     continue;
                 };
                 unsafe {
-                    self.context.CopySubresourceRegion(
+                    self.context().CopySubresourceRegion(
                         &staging_texture,
                         0,
                         0,
@@ -975,7 +989,7 @@ impl crate::CommandEncoder for CommandBuffer {
 
             let mut mapped = Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
             if let Err(e) = unsafe {
-                self.context.Map(
+                self.context().Map(
                     &staging_texture,
                     0,
                     Direct3D11::D3D11_MAP_READ,
@@ -998,7 +1012,7 @@ impl crate::CommandEncoder for CommandBuffer {
                 let dst_row = unsafe { data.as_mut_ptr().add(row * dst_pitch as usize) };
                 unsafe { ptr::copy_nonoverlapping(src_row, dst_row, row_bytes as usize) };
             }
-            unsafe { self.context.Unmap(&staging_texture, 0) };
+            unsafe { self.context().Unmap(&staging_texture, 0) };
 
             let staging_buffer =
                 match create_staging_buffer(&self.device, data_size, Some(data.as_slice())) {
@@ -1018,7 +1032,7 @@ impl crate::CommandEncoder for CommandBuffer {
                 continue;
             };
             unsafe {
-                self.context.CopySubresourceRegion(
+                self.context().CopySubresourceRegion(
                     dst.raw(),
                     0,
                     dst_offset,
@@ -1181,7 +1195,7 @@ impl crate::CommandEncoder for CommandBuffer {
             .cloned();
 
         unsafe {
-            self.context.OMSetRenderTargets(
+            self.context().OMSetRenderTargets(
                 if render_targets.is_empty() {
                     None
                 } else {
@@ -1201,7 +1215,7 @@ impl crate::CommandEncoder for CommandBuffer {
                     color.a as f32,
                 ];
                 if let Some(rtv) = attachment.target.view.raw_rtv() {
-                    unsafe { self.context.ClearRenderTargetView(rtv, &color) };
+                    unsafe { self.context().ClearRenderTargetView(rtv, &color) };
                 }
             }
         }
@@ -1224,7 +1238,7 @@ impl crate::CommandEncoder for CommandBuffer {
             if clear_flags != 0 {
                 if let Some(dsv) = depth_stencil.target.view.raw_dsv() {
                     unsafe {
-                        self.context.ClearDepthStencilView(
+                        self.context().ClearDepthStencilView(
                             dsv,
                             clear_flags,
                             depth_stencil.clear_value.0,
@@ -1250,8 +1264,8 @@ impl crate::CommandEncoder for CommandBuffer {
             bottom: i32::try_from(desc.extent.height).unwrap_or(i32::MAX),
         };
         unsafe {
-            self.context.RSSetViewports(Some(&[viewport]));
-            self.context.RSSetScissorRects(Some(&[scissor]));
+            self.context().RSSetViewports(Some(&[viewport]));
+            self.context().RSSetScissorRects(Some(&[scissor]));
         }
 
         self.render_pass = Some(RenderPassState {
@@ -1268,7 +1282,7 @@ impl crate::CommandEncoder for CommandBuffer {
 
     unsafe fn end_render_pass(&mut self) {
         unsafe {
-            self.context.OMSetRenderTargets(
+            self.context().OMSetRenderTargets(
                 None::<&[Option<Direct3D11::ID3D11RenderTargetView>]>,
                 None::<&Direct3D11::ID3D11DepthStencilView>,
             );
@@ -1288,7 +1302,7 @@ impl crate::CommandEncoder for CommandBuffer {
         // Validate the whole group before touching the D3D11 context. A failed
         // group must leave no partial binding state behind.
         if let Err(error) =
-            layout.validate_bind_group(index, group, dynamic_offsets, self.context1.is_some())
+            layout.validate_bind_group(index, group, dynamic_offsets, self.raw_context1.is_some())
         {
             self.encoder_error(format!("set_bind_group group {index}: {error}"));
             return;
@@ -1386,15 +1400,15 @@ impl crate::CommandEncoder for CommandBuffer {
                     let buffers = [Some(bound.buffer.raw().clone())];
                     if offset == 0 {
                         if entry.visibility.contains(wgt::ShaderStages::VERTEX) {
-                            unsafe { self.context.VSSetConstantBuffers(slot, Some(&buffers)) };
+                            unsafe { self.context().VSSetConstantBuffers(slot, Some(&buffers)) };
                         }
                         if entry.visibility.contains(wgt::ShaderStages::FRAGMENT) {
-                            unsafe { self.context.PSSetConstantBuffers(slot, Some(&buffers)) };
+                            unsafe { self.context().PSSetConstantBuffers(slot, Some(&buffers)) };
                         }
                         continue;
                     }
 
-                    let Some(context1) = self.context1.as_ref() else {
+                    let Some(context1) = self.context1() else {
                         self.encoder_error(format!(
                             "constant buffer binding {} has offset {offset}, but ID3D11DeviceContext1 is unavailable",
                             bound.binding
@@ -1499,10 +1513,10 @@ impl crate::CommandEncoder for CommandBuffer {
                     // is no dynamic offset to apply before binding it.
                     let views = [Some(srv.clone())];
                     if entry.visibility.contains(wgt::ShaderStages::VERTEX) {
-                        unsafe { self.context.VSSetShaderResources(slot, Some(&views)) };
+                        unsafe { self.context().VSSetShaderResources(slot, Some(&views)) };
                     }
                     if entry.visibility.contains(wgt::ShaderStages::FRAGMENT) {
-                        unsafe { self.context.PSSetShaderResources(slot, Some(&views)) };
+                        unsafe { self.context().PSSetShaderResources(slot, Some(&views)) };
                     }
                 }
                 wgt::BindingType::Buffer {
@@ -1573,10 +1587,10 @@ impl crate::CommandEncoder for CommandBuffer {
             };
             let views = [Some(srv.clone())];
             if entry.visibility.contains(wgt::ShaderStages::VERTEX) {
-                unsafe { self.context.VSSetShaderResources(slot, Some(&views)) };
+                unsafe { self.context().VSSetShaderResources(slot, Some(&views)) };
             }
             if entry.visibility.contains(wgt::ShaderStages::FRAGMENT) {
-                unsafe { self.context.PSSetShaderResources(slot, Some(&views)) };
+                unsafe { self.context().PSSetShaderResources(slot, Some(&views)) };
             }
         }
 
@@ -1611,10 +1625,10 @@ impl crate::CommandEncoder for CommandBuffer {
             }
             let samplers = [Some(bound.sampler.raw().clone())];
             if entry.visibility.contains(wgt::ShaderStages::VERTEX) {
-                unsafe { self.context.VSSetSamplers(slot, Some(&samplers)) };
+                unsafe { self.context().VSSetSamplers(slot, Some(&samplers)) };
             }
             if entry.visibility.contains(wgt::ShaderStages::FRAGMENT) {
-                unsafe { self.context.PSSetSamplers(slot, Some(&samplers)) };
+                unsafe { self.context().PSSetSamplers(slot, Some(&samplers)) };
             }
         }
     }
@@ -1656,14 +1670,16 @@ impl crate::CommandEncoder for CommandBuffer {
         self.sample_mask = pipeline.sample_mask();
 
         unsafe {
-            self.context.VSSetShader(pipeline.raw_vertex_shader(), None);
-            self.context.PSSetShader(pipeline.raw_pixel_shader(), None);
-            self.context.IASetInputLayout(pipeline.raw_input_layout());
-            self.context.IASetPrimitiveTopology(pipeline.topology());
-            self.context.RSSetState(pipeline.raw_rasterizer_state());
-            self.context
+            self.context()
+                .VSSetShader(pipeline.raw_vertex_shader(), None);
+            self.context()
+                .PSSetShader(pipeline.raw_pixel_shader(), None);
+            self.context().IASetInputLayout(pipeline.raw_input_layout());
+            self.context().IASetPrimitiveTopology(pipeline.topology());
+            self.context().RSSetState(pipeline.raw_rasterizer_state());
+            self.context()
                 .OMSetDepthStencilState(pipeline.raw_depth_stencil_state(), self.stencil_reference);
-            self.context.OMSetBlendState(
+            self.context().OMSetBlendState(
                 self.current_blend_state.as_ref(),
                 Some(&self.blend_constants),
                 self.sample_mask,
@@ -1690,7 +1706,7 @@ impl crate::CommandEncoder for CommandBuffer {
         };
         let format = super::conv::map_index_format(format);
         unsafe {
-            self.context
+            self.context()
                 .IASetIndexBuffer(binding.buffer.raw(), format, offset)
         };
         self.index_buffer_set = true;
@@ -1739,7 +1755,7 @@ impl crate::CommandEncoder for CommandBuffer {
         let strides = [stride];
         let offsets = [offset];
         unsafe {
-            self.context.IASetVertexBuffers(
+            self.context().IASetVertexBuffers(
                 index,
                 1,
                 Some(buffers.as_ptr()),
@@ -1769,7 +1785,7 @@ impl crate::CommandEncoder for CommandBuffer {
             MinDepth: depth_range.start,
             MaxDepth: depth_range.end,
         };
-        unsafe { self.context.RSSetViewports(Some(&[viewport])) };
+        unsafe { self.context().RSSetViewports(Some(&[viewport])) };
     }
 
     unsafe fn set_scissor_rect(&mut self, rect: &crate::Rect<u32>) {
@@ -1803,13 +1819,13 @@ impl crate::CommandEncoder for CommandBuffer {
             right,
             bottom,
         };
-        unsafe { self.context.RSSetScissorRects(Some(&[scissor])) };
+        unsafe { self.context().RSSetScissorRects(Some(&[scissor])) };
     }
 
     unsafe fn set_stencil_reference(&mut self, value: u32) {
         self.stencil_reference = value;
         if let Some(state) = self.current_depth_stencil_state.as_ref() {
-            unsafe { self.context.OMSetDepthStencilState(state, value) };
+            unsafe { self.context().OMSetDepthStencilState(state, value) };
         }
     }
 
@@ -1817,7 +1833,7 @@ impl crate::CommandEncoder for CommandBuffer {
         self.blend_constants = *color;
         if let Some(state) = self.current_blend_state.as_ref() {
             unsafe {
-                self.context
+                self.context()
                     .OMSetBlendState(state, Some(&self.blend_constants), self.sample_mask)
             };
         }
@@ -1842,7 +1858,7 @@ impl crate::CommandEncoder for CommandBuffer {
             return;
         }
         unsafe {
-            self.context
+            self.context()
                 .DrawInstanced(vertex_count, instance_count, first_vertex, first_instance)
         };
     }
@@ -1871,7 +1887,7 @@ impl crate::CommandEncoder for CommandBuffer {
             return;
         }
         unsafe {
-            self.context.DrawIndexedInstanced(
+            self.context().DrawIndexedInstanced(
                 index_count,
                 instance_count,
                 first_index,
@@ -1938,7 +1954,7 @@ impl crate::CommandEncoder for CommandBuffer {
                 return;
             };
             unsafe {
-                self.context
+                self.context()
                     .DrawInstancedIndirect(buffer.raw(), draw_offset)
             };
         }
@@ -2000,7 +2016,7 @@ impl crate::CommandEncoder for CommandBuffer {
                 return;
             };
             unsafe {
-                self.context
+                self.context()
                     .DrawIndexedInstancedIndirect(buffer.raw(), draw_offset)
             };
         }
