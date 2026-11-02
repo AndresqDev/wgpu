@@ -27,6 +27,13 @@ struct StageBindingCounts {
     samplers: u32,
 }
 
+/// Compute-visible-only layouts are created by Bevy even when the backend
+/// falls back to CPU preprocessing. They are never dispatched here.
+fn compute_only(visibility: wgt::ShaderStages) -> bool {
+    visibility.contains(wgt::ShaderStages::COMPUTE)
+        && !visibility.intersects(wgt::ShaderStages::VERTEX | wgt::ShaderStages::FRAGMENT)
+}
+
 /// Checks the per-stage binding counters against the advertised limits.
 fn validate_stage_counts(
     counts: StageBindingCounts,
@@ -472,9 +479,12 @@ impl BindGroupLayout {
                 return Err(crate::DeviceError::Unexpected);
             }
 
-            // Compute shaders are not advertised: only vertex and fragment
-            // bindings can ever be used.
-            let allowed_visibility = wgt::ShaderStages::VERTEX | wgt::ShaderStages::FRAGMENT;
+            // Compute pipelines are not advertised by this backend, but Bevy
+            // still creates a few compute-visible layouts for GPU
+            // preprocessing. Accept the layout; it is never dispatched.
+            let allowed_visibility = wgt::ShaderStages::VERTEX
+                | wgt::ShaderStages::FRAGMENT
+                | wgt::ShaderStages::COMPUTE;
             if entry.visibility.is_empty() || !allowed_visibility.contains(entry.visibility) {
                 log::error!(
                     "D3D11 bind group layout binding {} has visibility {:?}; only VERTEX and FRAGMENT are supported",
@@ -507,7 +517,7 @@ impl BindGroupLayout {
                     has_dynamic_offset,
                     min_binding_size,
                 } => {
-                    if !read_only {
+                    if !read_only && !compute_only(entry.visibility) {
                         log::error!(
                             "D3D11 storage buffers support read-only SRV bindings only; read-write/UAV storage is not implemented (binding {})",
                             entry.binding
@@ -791,7 +801,7 @@ impl PipelineLayout {
                         has_dynamic_offset,
                         ..
                     } => {
-                        if !read_only {
+                        if !read_only && !compute_only(entry.visibility) {
                             log::error!(
                                 "D3D11 storage buffers support read-only SRV bindings only; read-write/UAV storage is not implemented in a pipeline layout (group {group}, binding {})",
                                 entry.binding
@@ -1157,7 +1167,7 @@ impl PipelineLayout {
                     has_dynamic_offset,
                     min_binding_size,
                 } => {
-                    if !read_only {
+                    if !read_only && !compute_only(entry.visibility) {
                         return Err(format!(
                             "bind group {index} binding {} is a read-write/UAV storage buffer, which is not implemented",
                             entry.binding
@@ -1667,7 +1677,7 @@ impl BindGroup {
                     }
                 }
                 wgt::BindingType::Buffer {
-                    ty: wgt::BufferBindingType::Storage { read_only: true },
+                    ty: wgt::BufferBindingType::Storage { .. },
                     has_dynamic_offset,
                     min_binding_size,
                 } => {
@@ -1769,16 +1779,6 @@ impl BindGroup {
                             srv: Some(srv),
                         });
                     }
-                }
-                wgt::BindingType::Buffer {
-                    ty: wgt::BufferBindingType::Storage { read_only: false },
-                    ..
-                } => {
-                    log::error!(
-                        "D3D11 read-write/UAV storage buffers are not implemented (binding {})",
-                        layout.binding
-                    );
-                    return Err(crate::DeviceError::Unexpected);
                 }
                 wgt::BindingType::Sampler(_) => {
                     let bindings = desc

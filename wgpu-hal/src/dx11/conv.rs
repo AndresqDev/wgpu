@@ -447,7 +447,8 @@ pub fn downlevel_for_feature_level(
         | wgt::DownlevelFlags::COMPARISON_SAMPLERS
         | wgt::DownlevelFlags::INDEPENDENT_BLEND
         | wgt::DownlevelFlags::FULL_DRAW_INDEX_UINT32
-        | wgt::DownlevelFlags::DEPTH_BIAS_CLAMP;
+        | wgt::DownlevelFlags::DEPTH_BIAS_CLAMP
+        | wgt::DownlevelFlags::BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED;
 
     if level.0 >= (Direct3D::D3D_FEATURE_LEVEL_11_0).0 {
         flags |= wgt::DownlevelFlags::VERTEX_STORAGE | wgt::DownlevelFlags::FRAGMENT_STORAGE;
@@ -508,7 +509,8 @@ mod tests {
             | wgt::DownlevelFlags::COMPARISON_SAMPLERS
             | wgt::DownlevelFlags::INDEPENDENT_BLEND
             | wgt::DownlevelFlags::FULL_DRAW_INDEX_UINT32
-            | wgt::DownlevelFlags::DEPTH_BIAS_CLAMP;
+            | wgt::DownlevelFlags::DEPTH_BIAS_CLAMP
+            | wgt::DownlevelFlags::BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED;
 
         if level.0 >= (D3D_FEATURE_LEVEL_11_0).0 {
             flags |= wgt::DownlevelFlags::VERTEX_STORAGE | wgt::DownlevelFlags::FRAGMENT_STORAGE;

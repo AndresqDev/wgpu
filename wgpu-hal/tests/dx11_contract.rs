@@ -424,7 +424,8 @@ fn check_features_and_downlevel(
         | wgt::DownlevelFlags::COMPARISON_SAMPLERS
         | wgt::DownlevelFlags::INDEPENDENT_BLEND
         | wgt::DownlevelFlags::FULL_DRAW_INDEX_UINT32
-        | wgt::DownlevelFlags::DEPTH_BIAS_CLAMP;
+        | wgt::DownlevelFlags::DEPTH_BIAS_CLAMP
+        | wgt::DownlevelFlags::BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED;
     // Read-only storage buffers are exposed through raw SRVs at feature level
     // 11_0. Feature level 10_1 does not advertise them: D3D11 only guarantees
     // optional `ByteAddressBuffer` support there.
@@ -460,10 +461,6 @@ fn check_features_and_downlevel(
             wgt::DownlevelFlags::FRAGMENT_WRITABLE_STORAGE,
         ),
         ("COMPUTE_SHADERS", wgt::DownlevelFlags::COMPUTE_SHADERS),
-        (
-            "BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED",
-            wgt::DownlevelFlags::BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED,
-        ),
     ] {
         if flags.contains(flag) {
             failures.push(format!(

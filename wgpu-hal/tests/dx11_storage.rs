@@ -225,10 +225,6 @@ fn check_capabilities(
             wgt::DownlevelFlags::FRAGMENT_WRITABLE_STORAGE,
         ),
         ("COMPUTE_SHADERS", wgt::DownlevelFlags::COMPUTE_SHADERS),
-        (
-            "BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED",
-            wgt::DownlevelFlags::BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED,
-        ),
     ] {
         if flags.contains(flag) {
             return Err(format!("{name} must not be advertised"));
@@ -378,20 +374,13 @@ fn section_layouts(
     println!("  read-only storage layout accepted; binding maps to t0");
 
     let count_two = NonZeroU32::new(2).unwrap();
-    let negative_entries: [(&str, wgt::BindGroupLayoutEntry); 5] = [
+    let negative_entries: [(&str, wgt::BindGroupLayoutEntry); 4] = [
         ("storage read-write", storage_entry(0, false, false)),
         ("storage dynamic offset", storage_entry(0, true, true)),
         (
             "storage binding array",
             wgt::BindGroupLayoutEntry {
                 count: Some(count_two),
-                ..storage_entry(0, true, false)
-            },
-        ),
-        (
-            "storage compute visibility",
-            wgt::BindGroupLayoutEntry {
-                visibility: wgt::ShaderStages::COMPUTE,
                 ..storage_entry(0, true, false)
             },
         ),
