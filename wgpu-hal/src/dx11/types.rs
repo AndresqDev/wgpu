@@ -557,16 +557,10 @@ impl BindGroupLayout {
                         );
                         return Err(crate::DeviceError::Unexpected);
                     }
-                    if matches!(
-                        view_dimension,
-                        wgt::TextureViewDimension::D1 | wgt::TextureViewDimension::D3
-                    ) {
-                        log::error!(
-                            "D3D11 only supports D2, D2Array, Cube and CubeArray texture views (binding {} requests {view_dimension:?})",
-                            entry.binding
-                        );
-                        return Err(crate::DeviceError::Unexpected);
-                    }
+                    // D1/D3 are supported for the 1x1/1x1x1 fallback/LUT
+                    // textures. The bind group's view must still match the
+                    // texture dimension; that is checked when it is created.
+                    let _ = view_dimension;
                 }
                 wgt::BindingType::Buffer {
                     ty: wgt::BufferBindingType::Uniform,
