@@ -225,10 +225,6 @@ fn check_capabilities(
             wgt::DownlevelFlags::FRAGMENT_WRITABLE_STORAGE,
         ),
         ("COMPUTE_SHADERS", wgt::DownlevelFlags::COMPUTE_SHADERS),
-        (
-            "BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED",
-            wgt::DownlevelFlags::BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED,
-        ),
     ] {
         if flags.contains(flag) {
             return Err(format!("{name} must not be advertised"));
