@@ -472,9 +472,12 @@ impl BindGroupLayout {
                 return Err(crate::DeviceError::Unexpected);
             }
 
-            // Compute shaders are not advertised: only vertex and fragment
-            // bindings can ever be used.
-            let allowed_visibility = wgt::ShaderStages::VERTEX | wgt::ShaderStages::FRAGMENT;
+            // Compute pipelines are not advertised by this backend, but Bevy
+            // still creates a few compute-visible layouts for GPU
+            // preprocessing. Accept the layout; it is never dispatched.
+            let allowed_visibility = wgt::ShaderStages::VERTEX
+                | wgt::ShaderStages::FRAGMENT
+                | wgt::ShaderStages::COMPUTE;
             if entry.visibility.is_empty() || !allowed_visibility.contains(entry.visibility) {
                 log::error!(
                     "D3D11 bind group layout binding {} has visibility {:?}; only VERTEX and FRAGMENT are supported",

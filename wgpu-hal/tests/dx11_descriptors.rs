@@ -756,15 +756,6 @@ fn section_negative_layouts(
     )?;
     expect_layout_error(
         device,
-        "storage buffer visible to compute",
-        &[wgt::BindGroupLayoutEntry {
-            visibility: wgt::ShaderStages::COMPUTE,
-            ..storage_buffer_entry(0, true)
-        }],
-    )?;
-
-    expect_layout_error(
-        device,
         "storage texture",
         &[wgt::BindGroupLayoutEntry {
             binding: 0,
