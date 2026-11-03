@@ -284,14 +284,14 @@ impl RenderPassState {
 
 /// Command buffer type, which also acts as the command encoder.
 ///
-/// Keeping a single type for both roles follows the structure of the noop
-/// backend and avoids maintaining two state machines before deferred command
-/// lists are implemented.
+/// Each encoder records into a deferred D3D11 context; the queue executes the
+/// resulting command lists in submission order.
 #[derive(Debug)]
 pub struct CommandBuffer {
     raw_context: Direct3D11::ID3D11DeviceContext,
     raw_context1: Option<Direct3D11::ID3D11DeviceContext1>,
-    context_guard: Option<ContextGuard>,
+    raw_immediate: Direct3D11::ID3D11DeviceContext,
+    command_list: Option<Direct3D11::ID3D11CommandList>,
     device: Direct3D11::ID3D11Device,
     current_pipeline: Option<PipelineState>,
     current_blend_state: Option<Direct3D11::ID3D11BlendState>,
@@ -310,13 +310,16 @@ pub struct CommandBuffer {
 impl CommandBuffer {
     pub(crate) fn new(
         context: Direct3D11::ID3D11DeviceContext,
+        immediate: Direct3D11::ID3D11DeviceContext,
         device: Direct3D11::ID3D11Device,
+        command_list: Option<Direct3D11::ID3D11CommandList>,
     ) -> Self {
         let raw_context1 = context.cast::<Direct3D11::ID3D11DeviceContext1>().ok();
         Self {
             raw_context: context,
             raw_context1,
-            context_guard: None,
+            raw_immediate: immediate,
+            command_list,
             device,
             current_pipeline: None,
             current_blend_state: None,
@@ -344,6 +347,17 @@ impl CommandBuffer {
             .map(move |raw| Context1Ref { _guard: guard, raw })
     }
 
+    fn immediate(&self) -> ContextRef<'_> {
+        ContextRef {
+            _guard: lock_context(),
+            raw: &self.raw_immediate,
+        }
+    }
+
+    pub(crate) fn command_list(&self) -> Option<&Direct3D11::ID3D11CommandList> {
+        self.command_list.as_ref()
+    }
+
     /// Records the first explicit encoding error so [`crate::CommandEncoder::end_encoding`]
     /// rejects the command buffer instead of submitting partial state.
     fn encoder_error(&mut self, message: String) {
@@ -358,9 +372,6 @@ impl crate::CommandEncoder for CommandBuffer {
     type A = Api;
 
     unsafe fn begin_encoding(&mut self, _label: crate::Label) -> Result<(), crate::DeviceError> {
-        if self.context_guard.is_none() {
-            self.context_guard = Some(ContextGuard::acquire());
-        }
         self.error = None;
         self.render_pass = None;
         self.current_pipeline = None;
@@ -369,7 +380,6 @@ impl crate::CommandEncoder for CommandBuffer {
     }
 
     unsafe fn discard_encoding(&mut self) {
-        self.context_guard.take();
         self.error = None;
         self.render_pass = None;
         self.current_pipeline = None;
@@ -377,17 +387,26 @@ impl crate::CommandEncoder for CommandBuffer {
     }
 
     unsafe fn end_encoding(&mut self) -> Result<CommandBuffer, crate::DeviceError> {
-        self.context_guard.take();
         if let Some(error) = &self.error {
             log::error!("D3D11 command encoding failed: {error}");
             return Err(crate::DeviceError::Unexpected);
         }
-        // The supported commands have already been executed on the immediate
-        // context, so the returned buffer only has to carry the context forward
-        // for `Queue::submit` (which currently just flushes).
+        let mut list = None;
+        self.raw_context
+            .FinishCommandList(Foundation::BOOL::from(false), Some(&mut list))
+            .map_err(|error| {
+                log::error!("ID3D11DeviceContext::FinishCommandList failed: {error}");
+                crate::DeviceError::Unexpected
+            })?;
+        let list = list.ok_or_else(|| {
+            log::error!("FinishCommandList succeeded without returning a command list");
+            crate::DeviceError::Unexpected
+        })?;
         Ok(CommandBuffer::new(
             self.raw_context.clone(),
+            self.raw_immediate.clone(),
             self.device.clone(),
+            Some(list),
         ))
     }
 
@@ -426,7 +445,7 @@ impl crate::CommandEncoder for CommandBuffer {
             BufferMapMode::Staging if buffer.cpu_writable() => {
                 let mut mapped = Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
                 let result = unsafe {
-                    self.context().Map(
+                    self.immediate().Map(
                         buffer.raw(),
                         0,
                         Direct3D11::D3D11_MAP_WRITE,
@@ -444,7 +463,7 @@ impl crate::CommandEncoder for CommandBuffer {
                         0,
                         size as usize,
                     );
-                    self.context().Unmap(buffer.raw(), 0);
+                    self.immediate().Unmap(buffer.raw(), 0);
                 }
             }
             BufferMapMode::Dynamic if buffer.cpu_writable() => {
@@ -456,7 +475,7 @@ impl crate::CommandEncoder for CommandBuffer {
                 );
                 let mut mapped = Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
                 let result = unsafe {
-                    self.context().Map(
+                    self.immediate().Map(
                         buffer.raw(),
                         0,
                         Direct3D11::D3D11_MAP_WRITE_DISCARD,
@@ -470,7 +489,7 @@ impl crate::CommandEncoder for CommandBuffer {
                 }
                 unsafe {
                     ptr::write_bytes(mapped.pData as *mut u8, 0, buffer.size() as usize);
-                    self.context().Unmap(buffer.raw(), 0);
+                    self.immediate().Unmap(buffer.raw(), 0);
                 }
             }
             _ => {
@@ -753,7 +772,7 @@ impl crate::CommandEncoder for CommandBuffer {
                 let map_raw = src.staging().unwrap_or_else(|| src.raw());
                 let mut mapped_src = Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
                 let mapped = unsafe {
-                    self.context().Map(
+                    self.immediate().Map(
                         map_raw,
                         0,
                         Direct3D11::D3D11_MAP_READ,
@@ -767,7 +786,7 @@ impl crate::CommandEncoder for CommandBuffer {
                             (mapped_src.pData as *const u8).add(copy.buffer_layout.offset as usize)
                         };
                         unsafe {
-                            self.context().UpdateSubresource(
+                            self.immediate().UpdateSubresource(
                                 dst.raw(),
                                 dst.subresource_index(
                                     copy.texture_base.mip_level,
@@ -778,7 +797,7 @@ impl crate::CommandEncoder for CommandBuffer {
                                 pitch,
                                 pitch.saturating_mul(rows),
                             );
-                            self.context().Unmap(map_raw, 0);
+                            self.immediate().Unmap(map_raw, 0);
                         }
                         src.set_unmapped();
                         continue;
@@ -786,7 +805,7 @@ impl crate::CommandEncoder for CommandBuffer {
                 } else if let Err(error) = mapped {
                     log::warn!("failed to map the CPU upload buffer for texture upload: {error}");
                 }
-                unsafe { self.context().Unmap(map_raw, 0) };
+                unsafe { self.immediate().Unmap(map_raw, 0) };
                 src.set_unmapped();
             }
 
@@ -841,7 +860,7 @@ impl crate::CommandEncoder for CommandBuffer {
 
             let mut mapped_src = Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
             if let Err(e) = unsafe {
-                self.context().Map(
+                self.immediate().Map(
                     &staging,
                     0,
                     Direct3D11::D3D11_MAP_READ,
@@ -855,7 +874,7 @@ impl crate::CommandEncoder for CommandBuffer {
 
             let mut mapped_dst = Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
             if let Err(e) = unsafe {
-                self.context().Map(
+                self.immediate().Map(
                     &staging_texture,
                     0,
                     Direct3D11::D3D11_MAP_WRITE,
@@ -863,7 +882,7 @@ impl crate::CommandEncoder for CommandBuffer {
                     Some(&mut mapped_dst),
                 )
             } {
-                unsafe { self.context().Unmap(&staging, 0) };
+                unsafe { self.immediate().Unmap(&staging, 0) };
                 log::error!("failed to map the staging texture for texture upload: {e}");
                 continue;
             }
@@ -877,8 +896,8 @@ impl crate::CommandEncoder for CommandBuffer {
             }
 
             unsafe {
-                self.context().Unmap(&staging_texture, 0);
-                self.context().Unmap(&staging, 0);
+                self.immediate().Unmap(&staging_texture, 0);
+                self.immediate().Unmap(&staging, 0);
 
                 let full_depth_subresource = dst.format().has_depth_aspect()
                     && dst.mip_level_count() == 1
@@ -1013,14 +1032,14 @@ impl crate::CommandEncoder for CommandBuffer {
                 && copy.size.depth == 1;
 
             if full_depth_subresource {
-                unsafe { self.context().CopyResource(&staging_texture, src.raw()) };
+                unsafe { self.immediate().CopyResource(&staging_texture, src.raw()) };
             } else {
                 let Some(src_box) = make_box(&copy.texture_base.origin, &copy.size) else {
                     log::error!("texture-to-buffer source box overflowed");
                     continue;
                 };
                 unsafe {
-                    self.context().CopySubresourceRegion(
+                    self.immediate().CopySubresourceRegion(
                         &staging_texture,
                         0,
                         0,
@@ -1038,7 +1057,7 @@ impl crate::CommandEncoder for CommandBuffer {
 
             let mut mapped = Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
             if let Err(e) = unsafe {
-                self.context().Map(
+                self.immediate().Map(
                     &staging_texture,
                     0,
                     Direct3D11::D3D11_MAP_READ,
@@ -1061,7 +1080,7 @@ impl crate::CommandEncoder for CommandBuffer {
                 let dst_row = unsafe { data.as_mut_ptr().add(row * dst_pitch as usize) };
                 unsafe { ptr::copy_nonoverlapping(src_row, dst_row, row_bytes as usize) };
             }
-            unsafe { self.context().Unmap(&staging_texture, 0) };
+            unsafe { self.immediate().Unmap(&staging_texture, 0) };
 
             let staging_buffer =
                 match create_staging_buffer(&self.device, data_size, Some(data.as_slice())) {

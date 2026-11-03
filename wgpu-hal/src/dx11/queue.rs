@@ -281,13 +281,10 @@ impl crate::Queue for Queue {
         surface_textures: &[&SurfaceTexture],
         (fence, fence_value): (&Fence, crate::FenceValue),
     ) -> Result<(), crate::DeviceError> {
-        // The immediate context is shared with command encoding and is not
-        // thread-safe. Hold the same lock while flushing and arming markers.
+        // The immediate context is shared with uploads and presentation. Hold
+        // the same lock while executing command lists and arming markers.
         let _context_guard = super::command::lock_context();
-        // Render-pass clears are executed immediately on the shared immediate
-        // context, so submission only has to flush the context. Deferred
-        // contexts and ordered command-list execution are the next milestone.
-        let _ = (command_buffers, surface_textures);
+        let _ = surface_textures;
 
         if let Some(error) = device_removed(&self.device) {
             log::error!("cannot submit to the D3D11 device because it was removed: {error}");
@@ -296,8 +293,7 @@ impl crate::Queue for Queue {
         }
 
         // The HAL contract says a fence value lower than the highest submitted
-        // value has no effect. Commands still execute immediately on the
-        // immediate context, so flush the already-recorded work, but do not arm
+        // value has no effect. Flush already-submitted work, but do not arm
         // another marker: reusing an out-of-order value would make `wait`
         // publish completion for a value that this marker does not cover.
         if fence_value <= fence.pending() {
@@ -314,6 +310,23 @@ impl crate::Queue for Queue {
             }
             self.report_debug_messages();
             return Ok(());
+        }
+
+        for command_buffer in command_buffers {
+            let Some(command_list) = command_buffer.command_list() else {
+                continue;
+            };
+            if let Err(error) = unsafe {
+                self.context
+                    .ExecuteCommandList(command_list, Foundation::BOOL::from(false))
+            } {
+                log::error!("ID3D11DeviceContext::ExecuteCommandList failed: {error}");
+                self.report_debug_messages();
+                if device_removed(&self.device).is_some() {
+                    return Err(crate::DeviceError::Lost);
+                }
+                return Err(crate::DeviceError::Unexpected);
+            }
         }
 
         // Arm a per-fence marker after everything recorded so far, then hand

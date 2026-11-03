@@ -1687,9 +1687,22 @@ impl crate::Device for Device {
         &self,
         _desc: &crate::CommandEncoderDescriptor<super::Queue>,
     ) -> Result<CommandBuffer, crate::DeviceError> {
+        let mut deferred: Option<Direct3D11::ID3D11DeviceContext> = None;
+        self.raw_device
+            .CreateDeferredContext(0, Some(&mut deferred))
+            .map_err(|error| {
+                log::error!("ID3D11Device::CreateDeferredContext failed: {error}");
+                crate::DeviceError::Unexpected
+            })?;
+        let deferred = deferred.ok_or_else(|| {
+            log::error!("CreateDeferredContext succeeded without returning a context");
+            crate::DeviceError::Unexpected
+        })?;
         Ok(CommandBuffer::new(
+            deferred,
             self.raw_context.clone(),
             self.raw_device.clone(),
+            None,
         ))
     }
 
