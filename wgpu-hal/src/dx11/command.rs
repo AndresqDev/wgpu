@@ -334,6 +334,13 @@ impl CommandBuffer {
         command_list: Option<Direct3D11::ID3D11CommandList>,
     ) -> Self {
         let raw_context1 = context.cast::<Direct3D11::ID3D11DeviceContext1>().ok();
+        let special_constants = match create_special_constants_buffer(&device) {
+            Ok(buffer) => Some(buffer),
+            Err(error) => {
+                log::error!("failed to create the D3D11 special-constants buffer: {error}");
+                None
+            }
+        };
         Self {
             raw_context: context,
             raw_context1,
@@ -346,13 +353,7 @@ impl CommandBuffer {
             blend_constants: [0.0; 4],
             sample_mask: u32::MAX,
             stencil_reference: 0,
-            special_constants: match create_special_constants_buffer(&device) {
-                Ok(buffer) => Some(buffer),
-                Err(error) => {
-                    log::error!("failed to create the D3D11 special-constants buffer: {error}");
-                    None
-                }
-            },
+            special_constants,
             render_pass: None,
             index_buffer_set: false,
             error: None,
