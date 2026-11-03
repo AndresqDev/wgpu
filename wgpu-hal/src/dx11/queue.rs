@@ -316,16 +316,8 @@ impl crate::Queue for Queue {
             let Some(command_list) = command_buffer.command_list() else {
                 continue;
             };
-            if let Err(error) = unsafe {
-                self.context
-                    .ExecuteCommandList(command_list, BOOL::from(false))
-            } {
-                log::error!("ID3D11DeviceContext::ExecuteCommandList failed: {error}");
-                self.report_debug_messages();
-                if device_removed(&self.device).is_some() {
-                    return Err(crate::DeviceError::Lost);
-                }
-                return Err(crate::DeviceError::Unexpected);
+            unsafe {
+                self.context.ExecuteCommandList(command_list, false);
             }
         }
 

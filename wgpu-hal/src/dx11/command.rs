@@ -393,7 +393,7 @@ impl crate::CommandEncoder for CommandBuffer {
         }
         let mut list = None;
         self.raw_context
-            .FinishCommandList(BOOL::from(false), Some(&mut list))
+            .FinishCommandList(false, Some(&mut list))
             .map_err(|error| {
                 log::error!("ID3D11DeviceContext::FinishCommandList failed: {error}");
                 crate::DeviceError::Unexpected
