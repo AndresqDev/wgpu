@@ -209,20 +209,29 @@ fn create_staging_texture(
     raw.ok_or_else(|| windows::core::Error::from_hresult(Foundation::E_UNEXPECTED))
 }
 
-/// Creates the per-encoder constant buffer consumed by Naga's special constants.
+/// Creates an immutable constant buffer consumed by Naga's special constants.
+///
+/// Each distinct draw base gets its own resource: a deferred command list must
+/// not observe later `Map` calls on one shared dynamic buffer.
 fn create_special_constants_buffer(
     device: &Direct3D11::ID3D11Device,
+    values: [u32; 4],
 ) -> windows::core::Result<Direct3D11::ID3D11Buffer> {
     let desc = Direct3D11::D3D11_BUFFER_DESC {
         ByteWidth: 16,
-        Usage: Direct3D11::D3D11_USAGE_DYNAMIC,
+        Usage: Direct3D11::D3D11_USAGE_IMMUTABLE,
         BindFlags: Direct3D11::D3D11_BIND_CONSTANT_BUFFER.0 as u32,
-        CPUAccessFlags: Direct3D11::D3D11_CPU_ACCESS_WRITE.0 as u32,
+        CPUAccessFlags: 0,
         MiscFlags: 0,
         StructureByteStride: 0,
     };
+    let initial = Direct3D11::D3D11_SUBRESOURCE_DATA {
+        pSysMem: values.as_ptr().cast(),
+        SysMemPitch: 0,
+        SysMemSlicePitch: 0,
+    };
     let mut raw = None;
-    unsafe { device.CreateBuffer(&desc, None, Some(&mut raw)) }?;
+    unsafe { device.CreateBuffer(&desc, Some(&initial), Some(&mut raw)) }?;
     raw.ok_or_else(|| windows::core::Error::from_hresult(Foundation::E_UNEXPECTED))
 }
 
@@ -316,8 +325,8 @@ pub struct CommandBuffer {
     blend_constants: [f32; 4],
     sample_mask: u32,
     stencil_reference: u32,
-    /// Feeds Naga's draw-index special constants at `b13`.
-    special_constants: Option<Direct3D11::ID3D11Buffer>,
+    /// Immutable buffers feeding Naga's draw-index special constants at `b13`.
+    special_constants: Vec<(i32, u32, Direct3D11::ID3D11Buffer)>,
     render_pass: Option<RenderPassState>,
     /// Whether `IASetIndexBuffer` has been called for the current render pass.
     index_buffer_set: bool,
@@ -334,13 +343,7 @@ impl CommandBuffer {
         command_list: Option<Direct3D11::ID3D11CommandList>,
     ) -> Self {
         let raw_context1 = context.cast::<Direct3D11::ID3D11DeviceContext1>().ok();
-        let special_constants = match create_special_constants_buffer(&device) {
-            Ok(buffer) => Some(buffer),
-            Err(error) => {
-                log::error!("failed to create the D3D11 special-constants buffer: {error}");
-                None
-            }
-        };
+        let special_constants = Vec::new();
         Self {
             raw_context: context,
             raw_context1,
@@ -399,33 +402,27 @@ impl CommandBuffer {
     /// Uploads the draw bases consumed by Naga's `vertex_index` and
     /// `instance_index` lowering. The values are packed as
     /// `{ first_vertex: i32, first_instance: u32, other: u32 }`.
-    fn set_special_constants(&self, first_vertex: i32, first_instance: u32) {
-        let Some(buffer) = self.special_constants.as_ref() else {
-            return;
+    fn set_special_constants(&mut self, first_vertex: i32, first_instance: u32) {
+        let buffer = if let Some((_, _, buffer)) = self
+            .special_constants
+            .iter()
+            .find(|(vertex, instance, _)| *vertex == first_vertex && *instance == first_instance)
+        {
+            buffer.clone()
+        } else {
+            let values = [first_vertex as u32, first_instance, 0, 0];
+            let buffer = match create_special_constants_buffer(&self.device, values) {
+                Ok(buffer) => buffer,
+                Err(error) => {
+                    log::error!("failed to create the D3D11 special-constants buffer: {error}");
+                    return;
+                }
+            };
+            self.special_constants
+                .push((first_vertex, first_instance, buffer.clone()));
+            buffer
         };
-        let mut mapped = Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
-        if let Err(error) = unsafe {
-            self.context().Map(
-                buffer,
-                0,
-                Direct3D11::D3D11_MAP_WRITE_DISCARD,
-                0,
-                Some(&mut mapped),
-            )
-        } {
-            log::error!("failed to map the D3D11 special-constants buffer: {error}");
-            return;
-        }
-        if mapped.pData.is_null() {
-            unsafe { self.context().Unmap(buffer, 0) };
-            return;
-        }
-        let values = [first_vertex as u32, first_instance, 0];
-        unsafe {
-            ptr::copy_nonoverlapping(values.as_ptr(), mapped.pData.cast::<u32>(), values.len());
-            self.context().Unmap(buffer, 0);
-        }
-        let buffers = [Some(buffer.clone())];
+        let buffers = [Some(buffer)];
         unsafe {
             self.context().VSSetConstantBuffers(13, Some(&buffers));
             self.context().PSSetConstantBuffers(13, Some(&buffers));
