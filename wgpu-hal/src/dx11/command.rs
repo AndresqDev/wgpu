@@ -747,14 +747,19 @@ impl crate::CommandEncoder for CommandBuffer {
             // directly from that mapping into a DEFAULT colour texture with
             // UpdateSubresource. This avoids an unnecessary GPU buffer copy
             // and the staging-texture round trip for the common upload path.
-            let is_default_color_texture = !dst.format().has_depth_aspect();
-            if is_default_color_texture && src.cpu_readable() && !src.set_mapped() {
+            // R8 coverage pages are used by the demand-filled font atlas. Keep
+            // them on the staging-texture path; UpdateSubresource with a
+            // sub-rectangle on single-channel array pages is not reliable on
+            // every D3D11 driver.
+            let direct_upload =
+                !dst.format().has_depth_aspect() && dst.format() != wgt::TextureFormat::R8Unorm;
+            if direct_upload && src.cpu_readable() && !src.set_mapped() {
                 log::error!(
                     "D3D11 buffer-to-texture source is already mapped; refusing an invalid copy"
                 );
                 continue;
             }
-            if is_default_color_texture && src.cpu_readable() {
+            if direct_upload && src.cpu_readable() {
                 let map_raw = src.staging().unwrap_or_else(|| src.raw());
                 let mut mapped_src = Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
                 let mapped = unsafe {
