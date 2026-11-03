@@ -827,7 +827,9 @@ impl crate::CommandEncoder for CommandBuffer {
                 continue;
             };
             unsafe {
-                self.context().CopySubresourceRegion(
+                // Uploads run before the frame's command lists are executed.
+                // Use the immediate context so the CPU mapping below observes the copy.
+                self.immediate().CopySubresourceRegion(
                     &staging,
                     0,
                     0,
@@ -922,7 +924,7 @@ impl crate::CommandEncoder for CommandBuffer {
                     // whole-resource form and avoids the depth box restriction.
                     self.context().CopyResource(dst.raw(), &staging_texture);
                 } else {
-                    self.context().CopySubresourceRegion(
+                    self.immediate().CopySubresourceRegion(
                         dst.raw(),
                         dst.subresource_index(
                             copy.texture_base.mip_level,
