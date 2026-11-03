@@ -318,7 +318,7 @@ impl crate::Queue for Queue {
             };
             if let Err(error) = unsafe {
                 self.context
-                    .ExecuteCommandList(command_list, Foundation::BOOL::from(false))
+                    .ExecuteCommandList(command_list, BOOL::from(false))
             } {
                 log::error!("ID3D11DeviceContext::ExecuteCommandList failed: {error}");
                 self.report_debug_messages();

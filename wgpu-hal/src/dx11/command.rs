@@ -26,7 +26,7 @@ use core::{
 
 use parking_lot::lock_api::RawMutex as _;
 use windows::{
-    core::Interface as _,
+    core::{Interface as _, BOOL},
     Win32::{
         Foundation,
         Graphics::{Direct3D11, Dxgi},
@@ -393,7 +393,7 @@ impl crate::CommandEncoder for CommandBuffer {
         }
         let mut list = None;
         self.raw_context
-            .FinishCommandList(Foundation::BOOL::from(false), Some(&mut list))
+            .FinishCommandList(BOOL::from(false), Some(&mut list))
             .map_err(|error| {
                 log::error!("ID3D11DeviceContext::FinishCommandList failed: {error}");
                 crate::DeviceError::Unexpected
