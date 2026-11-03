@@ -923,11 +923,23 @@ impl PipelineLayout {
             return Err(crate::DeviceError::Unexpected);
         }
 
+        // Naga's HLSL backend expects the host to provide the draw/instance
+        // base values used by `@builtin(vertex_index)` and
+        // `@builtin(instance_index)`. D3D11's native SV_InstanceID is always
+        // zero-based, while WebGPU exposes first_instance as part of the
+        // instance index. Keep the special constants in the last constant
+        // buffer slot, away from pipeline bind groups.
         let naga_options = hlsl::Options {
             shader_model: hlsl::ShaderModel::V5_0,
             binding_map,
             fake_missing_bindings: false,
-            special_constants_binding: None,
+            special_constants_binding: Some(hlsl::BindTarget {
+                space: 0,
+                register: 13,
+                binding_array_size: None,
+                dynamic_storage_buffer_offsets_index: None,
+                restrict_indexing: false,
+            }),
             immediates_target: None,
             sampler_binding_mode: hlsl::SamplerBindingMode::Direct,
             ..Default::default()
