@@ -230,6 +230,28 @@ pub fn compile_shader(
     })
 }
 
+/// Rewrites Naga's `ConstantBuffer<T>` special-constants declaration into a
+/// Shader Model 5.0 `cbuffer`. FXC (unlike DXC) rejects the resource-style
+/// declaration, while the generated field accesses are unchanged after the
+/// field prefix is removed.
+fn fxc_special_constants(mut source: String) -> String {
+    const STRUCT_MARKER: &str = "struct NagaConstants {";
+    if let Some(start) = source.find(STRUCT_MARKER) {
+        if let Some(end) = source[start..].find("};") {
+            source.replace_range(start..start + end + 2, "");
+        }
+    }
+    if let Some(start) = source.find("ConstantBuffer<NagaConstants>") {
+        if let Some(end) = source[start..].find(';') {
+            source.replace_range(
+                start..start + end + 1,
+                "cbuffer _NagaConstants : register(b13)\n{\n    int first_vertex;\n    int first_instance;\n    uint other;\n};",
+            );
+        }
+    }
+    source.replace("_NagaConstants.", "")
+}
+
 fn naga_to_hlsl(
     shader: &crate::NagaShader,
     module: &ShaderModule,
@@ -279,6 +301,8 @@ fn naga_to_hlsl(
             )
         })?
     };
+
+    let source = fxc_special_constants(source);
 
     let fxc_entry_point = reflection
         .entry_point_names
