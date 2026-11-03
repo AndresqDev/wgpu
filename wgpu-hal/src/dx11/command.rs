@@ -676,20 +676,6 @@ impl crate::CommandEncoder for CommandBuffer {
         let full_aspects = crate::FormatAspects::from(format);
 
         for copy in regions {
-            // The row-pitch path copies through staging buffers, which D3D11
-            // addresses in 4-byte units.
-            if copy.buffer_layout.offset % 4 != 0
-                || copy
-                    .buffer_layout
-                    .bytes_per_row
-                    .is_some_and(|bytes_per_row| bytes_per_row % 4 != 0)
-            {
-                log::error!(
-                    "D3D11 buffer-to-texture copies require 4-byte aligned offsets and row pitches"
-                );
-                continue;
-            }
-
             let aspect = copy.texture_base.aspect;
             if !aspect.is_one() || aspect != full_aspects {
                 log::error!(
@@ -807,6 +793,20 @@ impl crate::CommandEncoder for CommandBuffer {
                 }
                 unsafe { self.immediate().Unmap(map_raw, 0) };
                 src.set_unmapped();
+            }
+
+            // The staging-buffer fallback addresses rows in 4-byte units. The
+            // direct UpdateSubresource path above supports arbitrary R8 pitches.
+            if copy.buffer_layout.offset % 4 != 0
+                || copy
+                    .buffer_layout
+                    .bytes_per_row
+                    .is_some_and(|bytes_per_row| bytes_per_row % 4 != 0)
+            {
+                log::error!(
+                    "D3D11 staging buffer-to-texture copies require 4-byte aligned offsets and row pitches"
+                );
+                continue;
             }
 
             let staging = match create_staging_buffer(&self.device, data_size, None) {
